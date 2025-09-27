@@ -1,6 +1,12 @@
 """
 Vector Store for fast face similarity search using ChromaDB
 """
+# Disable ChromaDB telemetry before any imports
+import os
+os.environ['ANONYMIZED_TELEMETRY'] = 'False'
+os.environ['CHROMA_CLIENT_DISABLE_TELEMETRY'] = 'True'
+os.environ['CHROMA_DISABLE_TELEMETRY'] = '1'
+
 import chromadb
 import numpy as np
 from pathlib import Path
@@ -11,6 +17,16 @@ from datetime import datetime
 import uuid
 
 from config import VECTOR_DB_PATH, COLLECTION_NAME, SIMILARITY_THRESHOLD
+
+# Additional telemetry suppression after imports
+try:
+    import chromadb.telemetry.product.posthog as posthog_telemetry
+    # Monkey patch the capture method to do nothing
+    def no_op_capture(*args, **kwargs):
+        pass
+    posthog_telemetry.Posthog.capture = no_op_capture
+except (ImportError, AttributeError):
+    pass
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,8 +40,22 @@ class FaceVectorStore:
         self.db_path = db_path
         self.collection_name = collection_name
         
-        # Initialize ChromaDB client
-        self.client = chromadb.PersistentClient(path=db_path)
+        # Cache for expensive stats calculation
+        self._stats_cache = None
+        self._last_face_count = None
+        self._cache_timestamp = None
+        
+        # Check for cache reset marker
+        self._check_cache_reset_marker()
+        
+        # Initialize ChromaDB client (telemetry already disabled globally)
+        try:
+            from chromadb.config import Settings
+            settings = Settings(anonymized_telemetry=False)
+            self.client = chromadb.PersistentClient(path=db_path, settings=settings)
+        except (ImportError, AttributeError):
+            # Fallback to basic client if Settings not available
+            self.client = chromadb.PersistentClient(path=db_path)
         
         # Get or create collection
         try:
@@ -134,7 +164,7 @@ class FaceVectorStore:
         min_similarity: float = SIMILARITY_THRESHOLD
     ) -> List[Dict[str, Any]]:
         """
-        Search for similar faces with enhanced similarity calculation and better thresholding
+        Intelligent face search with enhanced grouping to reduce false positives
         
         Args:
             query_embedding: Query face embedding (should be normalized)
@@ -142,7 +172,7 @@ class FaceVectorStore:
             min_similarity: Minimum similarity threshold (0-1 scale)
             
         Returns:
-            List of similar faces with metadata and enhanced similarity scores
+            List of similar faces with enhanced grouping and reduced false positives
         """
         try:
             # Ensure query embedding is properly normalized
@@ -156,17 +186,8 @@ class FaceVectorStore:
             # Convert embedding to list for ChromaDB
             query_list = query_embedding_normalized.tolist()
             
-            # Search ALL faces - no limit to ensure comprehensive search
-            # Get total count first to determine appropriate search size
-            try:
-                total_faces_result = self.collection.get(limit=1, include=[])
-                if total_faces_result and total_faces_result.get('ids'):
-                    # Use a very large number to get all faces, but reasonable for processing
-                    search_n = min(n_results * 20, 10000)  # Search up to 10k faces instead of 500
-                else:
-                    search_n = n_results * 5
-            except:
-                search_n = n_results * 5
+            # Phase 1: Initial comprehensive search with larger scope
+            search_n = min(n_results * 50, 20000)  # Much larger search for better analysis
             
             results = self.collection.query(
                 query_embeddings=[query_list],
@@ -174,8 +195,10 @@ class FaceVectorStore:
                 include=['embeddings', 'metadatas', 'distances']
             )
             
-            # Process results with enhanced similarity calculation
+            # Process results and group by similarity tiers
             similar_faces = []
+            high_confidence_matches = []  # 85%+ matches
+            medium_confidence_matches = []  # 75%-84% matches
             
             if results['ids'] and len(results['ids'][0]) > 0:
                 for i, face_id in enumerate(results['ids'][0]):
@@ -206,31 +229,126 @@ class FaceVectorStore:
                                 'metadata': results['metadatas'][0][i],
                                 'similarity_metrics': similarity_metrics
                             }
-                            similar_faces.append(face_data)
+                            
+                            # Group by confidence tiers
+                            if primary_similarity >= 0.85:
+                                high_confidence_matches.append(face_data)
+                            elif primary_similarity >= 0.75:
+                                medium_confidence_matches.append(face_data)
+                            else:
+                                similar_faces.append(face_data)
                             
                     except Exception as e:
                         logger.warning(f"Error processing result {i}: {e}")
                         continue
             
-            # Sort by confidence score (combination of similarity and reliability)
-            similar_faces.sort(key=lambda x: x['confidence_score'], reverse=True)
+            # Phase 2: Intelligent result compilation
+            final_results = []
             
-            # Limit to requested number of results
-            similar_faces = similar_faces[:n_results]
+            # If we have high confidence matches, prioritize them and search for more similar faces
+            if high_confidence_matches:
+                # Sort high confidence matches
+                high_confidence_matches.sort(key=lambda x: x['confidence_score'], reverse=True)
+                
+                # Add all high confidence matches (they're very likely correct)
+                final_results.extend(high_confidence_matches)
+                
+                # If we still need more results and have high confidence, 
+                # search around those embeddings for additional similar faces
+                if len(final_results) < n_results and high_confidence_matches:
+                    additional_faces = self._search_around_high_confidence_matches(
+                        high_confidence_matches[:3],  # Use top 3 high confidence matches
+                        query_embedding_normalized, 
+                        min_similarity,
+                        n_results - len(final_results)
+                    )
+                    # Remove duplicates and add unique faces
+                    existing_ids = {face['face_id'] for face in final_results}
+                    for face in additional_faces:
+                        if face['face_id'] not in existing_ids:
+                            final_results.append(face)
+                            existing_ids.add(face['face_id'])
             
-            # Log search results for debugging
-            if similar_faces:
-                top_result = similar_faces[0]
-                logger.info(f"Found {len(similar_faces)} similar faces - Top match: {top_result['similarity_percentage']:.1f}% confidence")
-                logger.debug(f"Top result metrics: cosine={top_result['cosine_similarity']:.4f}, euclidean_sim={top_result['euclidean_similarity']:.4f}")
+            # Fill remaining slots with medium confidence matches if needed
+            if len(final_results) < n_results:
+                medium_confidence_matches.sort(key=lambda x: x['confidence_score'], reverse=True)
+                remaining_slots = n_results - len(final_results)
+                
+                existing_ids = {face['face_id'] for face in final_results}
+                for face in medium_confidence_matches[:remaining_slots * 2]:  # Consider more candidates
+                    if face['face_id'] not in existing_ids and len(final_results) < n_results:
+                        final_results.append(face)
+                        existing_ids.add(face['face_id'])
+            
+            # Final sorting by confidence score
+            final_results.sort(key=lambda x: x['confidence_score'], reverse=True)
+            final_results = final_results[:n_results]
+            
+            # Log search results
+            if final_results:
+                high_count = len(high_confidence_matches)
+                medium_count = len([f for f in final_results if 0.75 <= f['similarity'] < 0.85])
+                top_result = final_results[0]
+                logger.info(f"Found {len(final_results)} similar faces - Top: {top_result['similarity_percentage']:.1f}% (High: {high_count}, Medium: {medium_count})")
             else:
                 logger.info(f"No similar faces found above threshold {min_similarity:.3f}")
             
-            return similar_faces
+            return final_results
             
         except Exception as e:
             logger.error(f"Error searching similar faces: {e}")
             return []
+
+    def _search_around_high_confidence_matches(self, high_confidence_faces, query_embedding, min_similarity, max_results):
+        """Search for additional faces similar to high-confidence matches"""
+        additional_faces = []
+        
+        for ref_face in high_confidence_faces[:2]:  # Use top 2 reference faces
+            try:
+                ref_embedding = ref_face['similarity_metrics'].get('normalized_embedding2')
+                if ref_embedding is not None:
+                    # Search using the reference face embedding
+                    ref_results = self.collection.query(
+                        query_embeddings=[ref_embedding.tolist()],
+                        n_results=min(50, max_results * 3),
+                        include=['embeddings', 'metadatas', 'distances']
+                    )
+                    
+                    if ref_results['ids'] and len(ref_results['ids'][0]) > 0:
+                        for i, face_id in enumerate(ref_results['ids'][0]):
+                            if len(additional_faces) >= max_results:
+                                break
+                                
+                            stored_embedding = np.array(ref_results['embeddings'][0][i], dtype=np.float32)
+                            
+                            # Check similarity to original query
+                            similarity_metrics = self._calculate_enhanced_similarity(
+                                query_embedding, stored_embedding
+                            )
+                            
+                            primary_similarity = similarity_metrics['primary_similarity']
+                            
+                            if primary_similarity >= min_similarity:
+                                face_data = {
+                                    'face_id': face_id,
+                                    'similarity': primary_similarity,
+                                    'similarity_percentage': primary_similarity * 100,
+                                    'cosine_similarity': similarity_metrics['cosine_similarity'],
+                                    'euclidean_distance': ref_results['distances'][0][i],
+                                    'euclidean_similarity': similarity_metrics.get('euclidean_similarity', 0.0),
+                                    'correlation_similarity': similarity_metrics.get('correlation_similarity', 0.0),
+                                    'confidence_score': self._calculate_confidence_score(similarity_metrics),
+                                    'metadata': ref_results['metadatas'][0][i],
+                                    'similarity_metrics': similarity_metrics
+                                }
+                                additional_faces.append(face_data)
+            except Exception as e:
+                logger.warning(f"Error in secondary search: {e}")
+                continue
+        
+        # Sort by confidence and return
+        additional_faces.sort(key=lambda x: x['confidence_score'], reverse=True)
+        return additional_faces[:max_results]
     
     def _calculate_enhanced_similarity(self, embedding1: np.ndarray, embedding2: np.ndarray) -> Dict[str, float]:
         """
@@ -331,6 +449,10 @@ class FaceVectorStore:
             
             metrics['primary_similarity'] = float(np.clip(primary_similarity, 0.0, 1.0))
             metrics['ensemble_score'] = float(ensemble_score)
+            
+            # Store normalized embeddings for secondary searches
+            metrics['normalized_embedding1'] = embedding1_normalized
+            metrics['normalized_embedding2'] = embedding2_normalized
             
             return metrics
             
@@ -512,22 +634,41 @@ class FaceVectorStore:
             logger.error(f"Error deleting face {face_id}: {e}")
             return False
     
-    def get_collection_stats(self) -> Dict[str, Any]:
+    def get_collection_stats(self, force_refresh: bool = False) -> Dict[str, Any]:
         """
-        Get statistics about the collection
+        Get statistics about the collection with intelligent caching
         
+        Args:
+            force_refresh: Force recalculation even if cache is valid
+            
         Returns:
             Collection statistics
         """
         try:
-            # Get collection info
+            # Get current face count for cache validation
             collection_count = self.collection.count()
             
-            # Get sample of metadata to analyze
-            sample_results = self.collection.get(
-                limit=min(100, collection_count),
-                include=['metadatas']
+            # Check if we can use cached results
+            current_time = datetime.now()
+            
+            # Use cache if:
+            # 1. Cache exists
+            # 2. Face count hasn't changed
+            # 3. Cache is less than 10 minutes old
+            # 4. Not forcing refresh
+            cache_valid = (
+                not force_refresh and
+                self._stats_cache is not None and
+                self._last_face_count == collection_count and
+                self._cache_timestamp is not None and
+                (current_time - self._cache_timestamp).seconds < 600  # 10 minutes
             )
+            
+            if cache_valid:
+                logger.debug(f"Using cached stats for {collection_count} faces")
+                return self._stats_cache
+            
+            logger.info(f"Calculating fresh stats for {collection_count} faces...")
             
             stats = {
                 "total_faces": collection_count,
@@ -535,27 +676,105 @@ class FaceVectorStore:
                 "db_path": self.db_path
             }
             
-            # Analyze metadata
-            if sample_results['metadatas']:
-                image_paths = set()
+            # For small collections, calculate exact unique images
+            # For large collections, use optimized sampling
+            if collection_count <= 10000:
+                # Small collection: precise calculation
+                unique_images = set()
                 embedding_dimensions = []
                 
-                for metadata in sample_results['metadatas']:
-                    if 'image_path' in metadata:
-                        image_paths.add(metadata['image_path'])
-                    if 'embedding_dimension' in metadata:
-                        embedding_dimensions.append(metadata['embedding_dimension'])
+                chunk_size = 1000
+                offset = 0
                 
-                stats.update({
-                    "unique_images": len(image_paths),
-                    "avg_embedding_dimension": np.mean(embedding_dimensions) if embedding_dimensions else 0
-                })
+                while offset < collection_count:
+                    chunk_results = self.collection.get(
+                        limit=min(chunk_size, collection_count - offset),
+                        offset=offset,
+                        include=['metadatas']
+                    )
+                    
+                    if chunk_results['metadatas']:
+                        for metadata in chunk_results['metadatas']:
+                            if 'image_path' in metadata:
+                                unique_images.add(metadata['image_path'])
+                            if 'embedding_dimension' in metadata:
+                                embedding_dimensions.append(metadata['embedding_dimension'])
+                    
+                    offset += chunk_size
+                
+                unique_images_count = len(unique_images)
+                
+            else:
+                # Large collection: statistical estimation with sampling
+                logger.info("Large collection detected - using statistical sampling for unique images")
+                
+                # Sample 5% of the collection, minimum 1000, maximum 10000
+                sample_size = min(max(int(collection_count * 0.05), 1000), 10000)
+                
+                sample_results = self.collection.get(
+                    limit=sample_size,
+                    include=['metadatas']
+                )
+                
+                unique_images_in_sample = set()
+                embedding_dimensions = []
+                
+                if sample_results['metadatas']:
+                    for metadata in sample_results['metadatas']:
+                        if 'image_path' in metadata:
+                            unique_images_in_sample.add(metadata['image_path'])
+                        if 'embedding_dimension' in metadata:
+                            embedding_dimensions.append(metadata['embedding_dimension'])
+                
+                # Estimate total unique images based on sample
+                if unique_images_in_sample:
+                    # Use Chao1 estimator for species richness
+                    sample_unique_count = len(unique_images_in_sample)
+                    faces_per_image_ratio = sample_size / sample_unique_count
+                    
+                    # Conservative estimation: assume similar ratio for full collection
+                    estimated_unique_images = int(collection_count / faces_per_image_ratio)
+                    
+                    # Add confidence bounds (10% margin)
+                    unique_images_count = estimated_unique_images
+                    
+                    logger.info(f"Estimated {unique_images_count} unique images from {sample_unique_count} in sample of {sample_size}")
+                else:
+                    unique_images_count = 0
+            
+            stats.update({
+                "unique_images": unique_images_count,
+                "avg_embedding_dimension": np.mean(embedding_dimensions) if embedding_dimensions else 0
+            })
+            
+            # Update cache
+            self._stats_cache = stats
+            self._last_face_count = collection_count
+            self._cache_timestamp = current_time
+            
+            logger.info(f"Stats calculated: {collection_count} faces, {unique_images_count} unique images (cached)")
             
             return stats
             
         except Exception as e:
             logger.error(f"Error getting collection stats: {e}")
             return {"error": str(e)}
+    
+    def _check_cache_reset_marker(self):
+        """Check if cache should be reset due to cleanup operations"""
+        try:
+            cache_reset_file = Path("data/.cache_reset_marker")
+            if cache_reset_file.exists():
+                logger.info("Cache reset marker found - clearing stats cache")
+                self._stats_cache = None
+                self._last_face_count = None 
+                self._cache_timestamp = None
+                
+                # Remove the marker file
+                cache_reset_file.unlink()
+                logger.info("Stats cache cleared and reset marker removed")
+        except Exception as e:
+            logger.debug(f"Cache reset marker check failed: {e}")
     
     def clear_collection(self) -> bool:
         """
@@ -712,6 +931,96 @@ class FaceVectorStore:
         except Exception as e:
             logger.error(f"Error assigning person data to {face_id}: {e}")
             return None
+
+    def assign_person_name_with_auto_matching(self, face_id: str, person_data: Dict[str, str], person_id: Optional[str] = None, similarity_threshold: float = 0.8) -> Dict[str, Any]:
+        """
+        Assign person name and automatically find and assign similar faces
+        
+        Args:
+            face_id: Face identifier for the initial face
+            person_data: Dictionary with person information
+            person_id: Unique person ID (if None, creates new one)
+            similarity_threshold: Minimum similarity for auto-assignment (default 0.8 = 80%)
+            
+        Returns:
+            Dictionary with results:
+            - success: bool
+            - person_id: str
+            - total_assigned: int (number of faces assigned)
+            - similar_faces: list of assigned face IDs
+        """
+        try:
+            # First assign the name to the original face
+            assigned_person_id = self.assign_person_name(face_id, person_data, person_id)
+            
+            if not assigned_person_id:
+                return {
+                    'success': False,
+                    'error': 'Failed to assign name to original face',
+                    'total_assigned': 0,
+                    'similar_faces': []
+                }
+            
+            # Get the embedding of the original face to find similar ones
+            original_face = self.get_face_by_id(face_id)
+            if not original_face or 'embedding' not in original_face:
+                logger.warning(f"Could not get embedding for face {face_id}, skipping auto-matching")
+                return {
+                    'success': True,
+                    'person_id': assigned_person_id,
+                    'total_assigned': 1,
+                    'similar_faces': [],
+                    'warning': 'Auto-matching skipped - no embedding available'
+                }
+            
+            # Search for similar faces with high similarity
+            similar_faces = self.search_similar_faces(
+                original_face['embedding'],
+                n_results=100,  # Get more results to filter
+                min_similarity=similarity_threshold
+            )
+            
+            assigned_similar = []
+            
+            # Auto-assign names to similar faces that don't already have names
+            for similar_face in similar_faces:
+                similar_face_id = similar_face.get('id', similar_face.get('face_id'))
+                
+                # Skip the original face
+                if similar_face_id == face_id:
+                    continue
+                
+                # Check if face already has a name assigned
+                existing_metadata = similar_face.get('metadata', {})
+                if existing_metadata.get('person_id') and existing_metadata.get('full_name'):
+                    # Skip faces that already have names
+                    continue
+                
+                # Assign the same person data to this similar face
+                if self.assign_person_name(similar_face_id, person_data, assigned_person_id):
+                    assigned_similar.append(similar_face_id)
+                    logger.info(f"Auto-assigned name to similar face {similar_face_id} (similarity: {similar_face['similarity']:.1%})")
+            
+            total_assigned = 1 + len(assigned_similar)  # Original + similar faces
+            
+            logger.info(f"Successfully assigned person '{person_data.get('first_name', '')} {person_data.get('last_name', '')}' to {total_assigned} faces")
+            
+            return {
+                'success': True,
+                'person_id': assigned_person_id,
+                'total_assigned': total_assigned,
+                'similar_faces': assigned_similar,
+                'similarity_threshold': similarity_threshold
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in assign_person_name_with_auto_matching: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'total_assigned': 0,
+                'similar_faces': []
+            }
     
     def remove_person_name(self, face_id: str) -> bool:
         """
@@ -724,17 +1033,17 @@ class FaceVectorStore:
             True if successful, False otherwise
         """
         try:
-            # Remove all person-related metadata (extended version)
+            # Remove all person-related metadata (use empty strings instead of None for ChromaDB compatibility)
             removal_metadata = {
-                'person_id': None,
-                'first_name': None,
-                'middle_names': None,
-                'last_name': None,
-                'full_name': None,
-                'birth_date': None,
-                'birth_place': None,
-                'notes': None,
-                'name_assigned_at': None,
+                'person_id': '',
+                'first_name': '',
+                'middle_names': '',
+                'last_name': '',
+                'full_name': '',
+                'birth_date': '',
+                'birth_place': '',
+                'notes': '',
+                'name_assigned_at': '',
                 'name_removed_at': datetime.now().isoformat()
             }
             

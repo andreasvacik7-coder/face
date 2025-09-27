@@ -27,7 +27,7 @@ def load_and_preprocess_image(image_path: Union[str, Path]) -> Optional[np.ndarr
         
         # Check if file exists and is not empty
         if not image_path.exists():
-            logger.error(f"Image file does not exist: {image_path}")
+            logger.debug(f"Image file does not exist: {image_path}")
             return None
         
         if image_path.stat().st_size < 100:  # Less than 100 bytes is likely not a valid image

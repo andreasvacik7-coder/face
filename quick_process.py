@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from face_recognition_engine import FaceRecognitionEngine
 from vector_store import FaceVectorStore
-from image_scraper import advanced_scraper
+from old_image_scraper import advanced_scraper
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
