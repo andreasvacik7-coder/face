@@ -3,7 +3,8 @@
 Fast Batch Face Processing Script
 Optimized for maximum speed with decent accuracy
 """
-
+import face_recognition_models
+import face_recognition
 import sys
 import time
 import logging

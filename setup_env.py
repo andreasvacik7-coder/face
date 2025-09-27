@@ -1,21 +1,85 @@
 """
-Environment setup module to prevent threading issues
+Environment setup module for face recognition
+Handles environment configuration and prevents threading issues
 """
 import os
+import sys
 import warnings
+import multiprocessing
+
 
 def setup_environment():
-    """Set up environment variables to prevent threading issues and suppress warnings"""
-    
-    # Prevent TensorFlow threading issues
-    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow warnings
-    os.environ['OMP_NUM_THREADS'] = '1'
-    os.environ['OPENBLAS_NUM_THREADS'] = '1'
-    os.environ['MKL_NUM_THREADS'] = '1'
-    os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
-    os.environ['NUMEXPR_NUM_THREADS'] = '1'
-    
-    # Disable telemetry
-    os.environ['STREAMLIT_BROWSER_GATHER_USAGE_STATS'] = 'false'
-    
-    print("Environment configured to prevent threading issues and telemetry")
+    """
+    Set up the environment for optimal face recognition performance
+    """
+    try:
+        # Set threading and parallelization settings
+        os.environ['OMP_NUM_THREADS'] = '1'
+        os.environ['MKL_NUM_THREADS'] = '1'
+        os.environ['NUMEXPR_NUM_THREADS'] = '1'
+        os.environ['OPENBLAS_NUM_THREADS'] = '1'
+        
+        # Set multiprocessing start method for compatibility
+        if hasattr(multiprocessing, 'set_start_method'):
+            try:
+                multiprocessing.set_start_method('spawn', force=True)
+            except RuntimeError:
+                pass  # Already set
+        
+        # Suppress common warnings for cleaner output
+        warnings.filterwarnings('ignore', category=UserWarning, module='tensorflow')
+        warnings.filterwarnings('ignore', category=FutureWarning, module='tensorflow')
+        warnings.filterwarnings('ignore', message="pkg_resources is deprecated as an API.*")
+        warnings.filterwarnings('ignore', category=DeprecationWarning)
+        
+        # Set TensorFlow to use CPU only for better stability
+        os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+        
+        # Optimize for CPU performance
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Reduce TensorFlow logging
+        
+        return True
+        
+    except Exception as e:
+        print(f"Warning: Could not fully setup environment: {e}")
+        return False
+
+
+def get_optimal_workers():
+    """
+    Get optimal number of workers for the current system
+    """
+    try:
+        cpu_count = multiprocessing.cpu_count()
+        # Use 75% of available cores, minimum 1, maximum 8 for face recognition
+        optimal = max(1, min(8, int(cpu_count * 0.75)))
+        return optimal
+    except:
+        return 4  # Default fallback
+
+
+def get_optimal_batch_size():
+    """
+    Get optimal batch size based on system memory and CPU cores
+    """
+    try:
+        cpu_count = multiprocessing.cpu_count()
+        # Increase batch size based on available cores
+        if cpu_count >= 12:
+            return 50
+        elif cpu_count >= 8:
+            return 30
+        elif cpu_count >= 4:
+            return 20
+        else:
+            return 10
+    except:
+        return 10  # Default fallback
+
+
+if __name__ == "__main__":
+    print("Setting up environment...")
+    success = setup_environment()
+    print(f"Environment setup: {'Success' if success else 'Partial'}")
+    print(f"Optimal workers: {get_optimal_workers()}")
+    print(f"Optimal batch size: {get_optimal_batch_size()}")

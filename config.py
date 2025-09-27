@@ -36,7 +36,7 @@ FACE_EMBEDDING_MODELS = ["Facenet512", "ArcFace", "VGG-Face", "Facenet"]  # Ense
 FACE_DETECTION_BACKENDS = ["opencv", "mtcnn", "retinaface"]  # Multiple detection backends
 FACE_PREPROCESSING_ENABLED = True   # Erweiterte Gesichtsvorverarbeitung aktivieren
 FACE_QUALITY_VALIDATION = True     # Embedding-Qualität validieren
-FACE_SIMILARITY_ALGORITHM = "enhanced"  # "basic", "enhanced" oder "premium" für bessere Genauigkeit
+FACE_SIMILARITY_ALGORITHM = "premium"  # "basic", "enhanced" oder "premium" für bessere Genauigkeit
 FACE_ENSEMBLE_WEIGHTING = True     # Use weighted ensemble of multiple models
 FACE_ALIGNMENT_ENABLED = True      # Enable face alignment for better embeddings
 
