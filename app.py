@@ -67,6 +67,23 @@ if 'current_page' not in st.session_state:
 if 'detected_faces' not in st.session_state:
     st.session_state.detected_faces = None
 
+# Initialize persons cache to avoid repeated expensive database queries
+if 'cached_all_persons' not in st.session_state:
+    st.session_state.cached_all_persons = []
+if 'persons_cache_dirty' not in st.session_state:
+    st.session_state.persons_cache_dirty = True
+
+def get_cached_all_persons():
+    """Get all persons with caching to avoid repeated expensive database queries"""
+    if st.session_state.persons_cache_dirty or not st.session_state.cached_all_persons:
+        st.session_state.cached_all_persons = st.session_state.vector_store.get_all_persons()
+        st.session_state.persons_cache_dirty = False
+    return st.session_state.cached_all_persons
+
+def invalidate_persons_cache():
+    """Mark persons cache as dirty for refresh"""
+    st.session_state.persons_cache_dirty = True
+
 def main():
     """Main application function"""
     
@@ -123,25 +140,25 @@ def main():
         # Update active page
         st.session_state.active_page = page
     
-    # Check for modal displays BEFORE page content
+    # Check for modal displays - they will show as overlays, don't interrupt main page
     if 'info_face_id' in st.session_state and 'info_image_path' in st.session_state and 'info_face_location' in st.session_state:
         show_face_info_modal()
-        return  # Don't render page content when modal is open
+        # Don't return - let main page continue to render
     
     # Legacy modal support (for backward compatibility)
     if 'full_image_path' in st.session_state and 'full_image_face_location' in st.session_state:
         show_full_image_modal()
-        return  # Don't render page content when modal is open
+        # Don't return - let main page continue to render
     
     if 'analysis_image_path' in st.session_state and 'analysis_face_location' in st.session_state:
         show_analysis_modal()
-        return  # Don't render page content when modal is open
+        # Don't return - let main page continue to render
     
     if 'name_assign_face_id' in st.session_state:
         show_name_assignment_modal()
-        return  # Don't render page content when modal is open
+        # Don't return - let main page continue to render
 
-    # Main content area - only render if no modal is open
+    # Main content area - always render, modals will overlay
     if page == "🔍 Face Search":
         face_search_page()
     elif page == "📥 Image Upload & Processing":
@@ -173,6 +190,12 @@ def face_search_page():
         help="Upload an image containing a face to search for similar faces in the database"
     )
     
+    # Preserve uploaded file in session state for UI consistency
+    if uploaded_file is not None:
+        st.session_state.current_uploaded_file = uploaded_file
+    elif 'current_uploaded_file' in st.session_state:
+        uploaded_file = st.session_state.current_uploaded_file
+    
     col1, col2 = st.columns([1, 1])
     
     with col1:
@@ -181,60 +204,140 @@ def face_search_page():
             query_image = Image.open(uploaded_file)
             st.image(query_image, caption="Query Image", width='stretch')
             
-            # Search parameters
-            st.subheader("Search Parameters")
+            # Enhanced Search Parameters
+            st.subheader("🎯 Enhanced Search Parameters")
             
-            max_results = st.slider(
-                "Maximum Results", 
-                min_value=5, 
-                max_value=200, 
-                value=50,
-                help="Maximum number of similar faces to return"
-            )
+            col_a, col_b = st.columns(2)
             
-            similarity_threshold = st.slider(
-                "Similarity Threshold", 
-                min_value=0.0, 
-                max_value=1.0, 
-                value=0.4,
-                step=0.05,
-                help="Mindestähnlichkeit für Suchergebnisse (0.4 = 40% Ähnlichkeit). Höhere Werte = genauere Ergebnisse aber weniger Treffer."
-            )
+            with col_a:
+                max_results = st.slider(
+                    "Maximum Results", 
+                    min_value=5, 
+                    max_value=200, 
+                    value=50,
+                    help="Maximum number of similar faces to return"
+                )
+                
+                similarity_threshold = st.slider(
+                    "Similarity Threshold", 
+                    min_value=0.0, 
+                    max_value=1.0, 
+                    value=0.4,
+                    step=0.05,
+                    help="Mindestähnlichkeit für Suchergebnisse (0.4 = 40% Ähnlichkeit). Höhere Werte = genauere Ergebnisse aber weniger Treffer."
+                )
+                
+                # Image Quality Filter
+                quality_filter = st.selectbox(
+                    "🖼️ Image Quality Filter",
+                    ["All Quality", "High Quality Only", "Medium+ Quality", "Remove Poor Quality"],
+                    index=2,
+                    help="Filter results by image quality to improve accuracy"
+                )
+            
+            with col_b:
+                # Face Size Filter
+                min_face_size = st.slider(
+                    "Minimum Face Size (px)",
+                    min_value=20,
+                    max_value=200,
+                    value=50,
+                    help="Filter out very small faces which are often false positives"
+                )
+                
+                # Search Mode
+                search_mode = st.selectbox(
+                    "🎯 Search Mode",
+                    ["Balanced", "High Precision", "High Recall"],
+                    index=0,
+                    help="Balanced: Normal results | Precision: Fewer but better matches | Recall: More results, some false positives"
+                )
+                
+                # Result Sorting
+                sort_by = st.selectbox(
+                    "📊 Sort Results By",
+                    ["Similarity Score", "Image Quality", "Face Size", "Date Added", "File Name"],
+                    index=0,
+                    help="Order search results by different criteria"
+                )
+            
+            # Advanced Filters
+            with st.expander("🔧 Advanced Filters", expanded=False):
+                col_adv1, col_adv2 = st.columns(2)
+                
+                with col_adv1:
+                    confidence_threshold = st.slider(
+                        "Confidence Threshold",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=0.8,
+                        step=0.05,
+                        help="Minimum confidence in face detection (higher = more reliable faces)"
+                    )
+                    
+                    exclude_blurry = st.checkbox(
+                        "Exclude Blurry Images",
+                        value=True,
+                        help="Filter out blurry or low-quality images"
+                    )
+                
+                with col_adv2:
+                    aspect_ratio_filter = st.checkbox(
+                        "Filter Extreme Aspect Ratios",
+                        value=True,
+                        help="Remove faces with unusual width/height ratios (often false positives)"
+                    )
+                    
+                    brightness_filter = st.checkbox(
+                        "Filter Dark/Overexposed Images",
+                        value=False,
+                        help="Remove images with poor lighting conditions"
+                    )
             
             # Facial Attribute Analysis Info
             with st.expander("🧬 Facial Attribute Analysis", expanded=False):
                 st.markdown("""
-                **🎯 Neue Funktion: Detaillierte Gesichtsanalyse**
+                **🎯 New Feature: Detailed Facial Analysis**
                 
-                Zusätzlich zur Ähnlichkeitssuche können Sie jetzt für jedes gefundene Gesicht eine detaillierte Analyse durchführen:
+                In addition to similarity search, you can now perform detailed analysis on any found face:
                 
-                **📊 Analysierte Attribute:**
-                - **👤 Alter**: Geschätztes Alter (±4,65 Jahre Genauigkeit)  
-                - **⚧️ Geschlecht**: Männlich/Weiblich (97,44% Genauigkeit)
-                - **😊 Emotionen**: Glücklich, Neutral, Traurig, Wütend, Überrascht, Ängstlich, Angeekelt
-                - **🌍 Ethnische Herkunft**: Asiatisch, Kaukasisch, Nahöstlich, Indisch, Lateinamerikanisch, Afrikanisch
+                **📊 Analyzed Attributes:**
+                - **👤 Age**: Estimated age (±4.65 years accuracy)  
+                - **⚧️ Gender**: Male/Female (97.44% accuracy)
+                - **😊 Emotions**: Happy, Neutral, Sad, Angry, Surprised, Fearful, Disgusted
+                - **🌍 Ethnicity**: Asian, Caucasian, Middle Eastern, Indian, Latino, African
                 
-                **🔬 Technische Details:**
-                - Basiert auf DeepFace-Bibliothek mit neuronalen Netzen
-                - Hochpräzise Modelle für jeden Attributtyp
-                - Konfidenzwerte für jede Vorhersage
+                **🔬 Technical Details:**
+                - Based on DeepFace library with neural networks
+                - High-precision models for each attribute type
+                - Confidence values for every prediction
                 
-                **🚀 Verwendung:**
-                Klicken Sie auf den **🧬 Analyse**-Button bei jedem Suchergebnis für detaillierte Informationen.
+                **🚀 Usage:**
+                Click the **🧬 Analysis** button for any search result to get detailed information.
                 """)
                 
                 # Check if DeepFace is available
                 try:
                     import deepface
-                    st.success("✅ DeepFace ist installiert und bereit für Gesichtsanalyse!")
+                    st.success("✅ DeepFace is installed and ready for facial analysis!")
                 except ImportError:
-                    st.warning("⚠️ DeepFace nicht installiert. Installieren Sie mit: `pip install deepface`")
-                    if st.button("📥 DeepFace Installation anzeigen"):
+                    st.warning("⚠️ DeepFace not installed. Install with: `pip install deepface`")
+                    if st.button("📥 Show DeepFace Installation"):
                         st.code("pip install deepface", language="bash")
-                        st.info("Nach der Installation starten Sie die Anwendung neu.")
+                        st.info("Restart the application after installation.")
             
             # Step 1: Analyze uploaded image for faces
             if st.button("🔍 Analyze Image for Faces", type="primary"):
+                # Store search parameters in session state for enhanced search
+                st.session_state.quality_filter = quality_filter
+                st.session_state.min_face_size = min_face_size
+                st.session_state.search_mode = search_mode
+                st.session_state.sort_by = sort_by
+                st.session_state.confidence_threshold = confidence_threshold
+                st.session_state.exclude_blurry = exclude_blurry
+                st.session_state.aspect_ratio_filter = aspect_ratio_filter
+                st.session_state.brightness_filter = brightness_filter
+                
                 analyze_uploaded_image_for_faces(uploaded_file, max_results, similarity_threshold)
     
     with col2:
@@ -242,16 +345,31 @@ def face_search_page():
         if 'detected_faces' in st.session_state and st.session_state.detected_faces:
             show_face_selection_interface()
         
-        # Step 3: Display search results
-        if st.session_state.search_results:
-            display_search_results(st.session_state.search_results)
+    # Step 3: Display search results - ALWAYS show if available (moved outside col2 to persist after popup interactions)
+    if st.session_state.search_results:
+        st.markdown("---")
+        
+        # Add clear results button
+        col_results, col_clear = st.columns([4, 1])
+        with col_results:
+            st.subheader("🎯 Search Results")
+        with col_clear:
+            if st.button("🗑️ Clear", help="Clear search results", key="clear_search_results"):
+                st.session_state.search_results = []
+                if 'detected_faces' in st.session_state:
+                    del st.session_state.detected_faces
+                if 'current_uploaded_file' in st.session_state:
+                    del st.session_state.current_uploaded_file
+                st.rerun()
+        
+        display_search_results(st.session_state.search_results)
 
 def analyze_uploaded_image_for_faces(uploaded_file, max_results: int, similarity_threshold: float):
     """Analyze uploaded image and detect all faces"""
     
     temp_path = Path("/tmp/query_image.jpg")
     
-    with st.spinner("🔍 Analysiere Bild und erkenne Gesichter..."):
+    with st.spinner("🔍 Analyzing image and detecting faces..."):
         try:
             # Save uploaded file temporarily
             with open(temp_path, "wb") as f:
@@ -261,7 +379,7 @@ def analyze_uploaded_image_for_faces(uploaded_file, max_results: int, similarity
             query_image = load_and_preprocess_image(temp_path)
             
             if query_image is None:
-                st.error("❌ Fehler beim Laden des Bildes. Unterstützte Formate: JPG, PNG, BMP, WEBP")
+                st.error("❌ Error loading image. Supported formats: JPG, PNG, BMP, WEBP")
                 return
             
             # Detect faces
@@ -289,11 +407,11 @@ def analyze_uploaded_image_for_faces(uploaded_file, max_results: int, similarity
                 'temp_path': str(temp_path)
             }
             
-            st.success(f"✅ {len(face_locations)} Gesicht(er) erkannt! Wählen Sie rechts das gewünschte Gesicht für die Suche aus.")
+            st.success(f"✅ {len(face_locations)} face(s) detected! Select the desired face for search on the right.")
             st.rerun()
             
         except Exception as e:
-            st.error(f"❌ Fehler beim Analysieren des Bildes: {str(e)}")
+            st.error(f"❌ Error analyzing image: {str(e)}")
         finally:
             # Clean up temp file
             if temp_path.exists():
@@ -302,13 +420,13 @@ def analyze_uploaded_image_for_faces(uploaded_file, max_results: int, similarity
 def show_face_selection_interface():
     """Show interface for selecting which face to search for"""
     
-    st.subheader("👥 Gesichtsauswahl")
+    st.subheader("👥 Face Selection")
     
     detected_data = st.session_state.detected_faces
     face_locations = detected_data['face_locations']
     query_image = detected_data['query_image']
     
-    st.write(f"**{len(face_locations)} Gesicht(er) erkannt. Wählen Sie das Gesicht für die Suche:**")
+    st.write(f"**{len(face_locations)} face(s) detected. Select the face for search:**")
     
     # Display faces in a grid
     cols = st.columns(min(len(face_locations), 3))
@@ -327,15 +445,188 @@ def show_face_selection_interface():
             
             st.image(face_thumbnail, caption=f"Gesicht {idx+1}")
             
-            # Search button for this face
+            # Search button for this face with enhanced parameters
             if st.button(f"🔍 Nach Gesicht {idx+1} suchen", key=f"search_face_{idx}", width='stretch'):
-                search_with_selected_face(idx)
+                search_with_selected_face_enhanced(idx)
     
-    # Clear faces button
-    if st.button("🗑️ Gesichtserkennung zurücksetzen", key="clear_faces"):
+    # Clear faces button - only clear face detection, preserve search results
+    if st.button("🗑️ Reset Face Detection", key="clear_faces"):
         if 'detected_faces' in st.session_state:
             del st.session_state.detected_faces
         st.rerun()
+
+def search_with_selected_face_enhanced(face_index: int):
+    """Perform enhanced search using the selected face with advanced filtering"""
+    
+    detected_data = st.session_state.detected_faces
+    face_locations = detected_data['face_locations']
+    query_image = detected_data['query_image']
+    max_results = detected_data['max_results']
+    similarity_threshold = detected_data['similarity_threshold']
+    
+    # Get advanced search parameters from session state
+    search_params = {
+        'quality_filter': st.session_state.get('quality_filter', 'Medium+ Quality'),
+        'min_face_size': st.session_state.get('min_face_size', 50),
+        'search_mode': st.session_state.get('search_mode', 'Balanced'),
+        'sort_by': st.session_state.get('sort_by', 'Similarity Score'),
+        'confidence_threshold': st.session_state.get('confidence_threshold', 0.8),
+        'exclude_blurry': st.session_state.get('exclude_blurry', True),
+        'aspect_ratio_filter': st.session_state.get('aspect_ratio_filter', True),
+        'brightness_filter': st.session_state.get('brightness_filter', False)
+    }
+    
+    selected_face_location = face_locations[face_index]
+    
+    with st.spinner(f"🔍 Enhanced search for Face {face_index + 1} with quality filters..."):
+        try:
+            # Extract embedding for selected face
+            query_embedding = st.session_state.face_engine.extract_face_embedding(query_image, selected_face_location)
+            
+            if query_embedding is None:
+                st.error("❌ Fehler beim Extrahieren der Gesichtsmerkmale. Versuchen Sie ein anderes Gesicht.")
+                return
+            
+            # Adjust search parameters based on mode
+            adjusted_threshold = similarity_threshold
+            adjusted_max_results = max_results
+            
+            if search_params['search_mode'] == "High Precision":
+                adjusted_threshold = min(similarity_threshold + 0.1, 0.9)
+                adjusted_max_results = min(max_results, 25)
+            elif search_params['search_mode'] == "High Recall":
+                adjusted_threshold = max(similarity_threshold - 0.1, 0.2)
+                adjusted_max_results = max_results * 2
+            
+            # Search for similar faces
+            similar_faces = st.session_state.vector_store.search_similar_faces(
+                query_embedding, 
+                n_results=adjusted_max_results,
+                min_similarity=adjusted_threshold
+            )
+            
+            # Apply advanced filters
+            if similar_faces:
+                filtered_faces = apply_advanced_face_filters(similar_faces, search_params)
+                
+                # Sort results based on selected criteria
+                sorted_faces = sort_search_results(filtered_faces, search_params['sort_by'])
+                
+                # Store results
+                st.session_state.search_results = sorted_faces
+                
+                # Show enhanced results summary
+                if sorted_faces:
+                    original_count = len(similar_faces)
+                    filtered_count = len(sorted_faces)
+                    avg_similarity = sum(face['similarity'] for face in sorted_faces) / len(sorted_faces)
+                    top_similarity = sorted_faces[0]['similarity'] if sorted_faces else 0
+                    
+                    st.success(f"""
+                    🎯 **Enhanced Search Results for Face {face_index + 1}**
+                    
+                    📊 **Quality Metrics:**
+                    - Original Results: {original_count}
+                    - After Quality Filtering: {filtered_count}
+                    - Top Similarity: {top_similarity*100:.1f}%
+                    - Average Similarity: {avg_similarity*100:.1f}%
+                    - Search Mode: {search_params['search_mode']}
+                    - Quality Filter: {search_params['quality_filter']}
+                    """)
+                else:
+                    st.warning(f"""
+                    ⚠️ **No high-quality matches found for Face {face_index + 1}**
+                    
+                    **Try adjusting:**
+                    - Lower similarity threshold (currently: {similarity_threshold*100:.0f}%)
+                    - Change quality filter to "All Quality"
+                    - Switch to "High Recall" search mode
+                    - Reduce minimum face size filter
+                    """)
+            else:
+                st.warning(f"No similar faces found for Face {face_index + 1}")
+            
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"❌ Fehler bei der erweiterten Suche: {str(e)}")
+
+def apply_advanced_face_filters(faces, search_params):
+    """Apply advanced quality and size filters to search results"""
+    filtered_faces = []
+    
+    for face in faces:
+        try:
+            metadata = face.get('metadata', {})
+            face_size = 50  # Default face size
+            
+            # Face size filter
+            location_str = metadata.get('location', '0,0,0,0')
+            coords = location_str.split(',')
+            if len(coords) == 4:
+                top, right, bottom, left = map(int, coords)
+                face_width = right - left
+                face_height = bottom - top
+                face_size = min(face_width, face_height)
+                
+                if face_size < search_params['min_face_size']:
+                    continue
+                
+                # Aspect ratio filter
+                if search_params['aspect_ratio_filter']:
+                    aspect_ratio = face_width / max(face_height, 1)
+                    if aspect_ratio < 0.5 or aspect_ratio > 2.0:  # Skip extremely wide/tall faces
+                        continue
+            
+            # Confidence filter (if available in metadata)
+            confidence = metadata.get('confidence', 1.0)
+            if confidence < search_params['confidence_threshold']:
+                continue
+            
+            # Quality-based filtering
+            if search_params['quality_filter'] == "High Quality Only":
+                # Only include faces with high similarity and good size
+                if face['similarity'] < 0.7 or face_size < 80:
+                    continue
+            elif search_params['quality_filter'] == "Remove Poor Quality":
+                # Remove obviously poor quality results
+                if face['similarity'] < 0.3 or face_size < 30:
+                    continue
+            
+            filtered_faces.append(face)
+            
+        except Exception as e:
+            # Skip faces with malformed metadata
+            continue
+    
+    return filtered_faces
+
+def sort_search_results(faces, sort_by):
+    """Sort search results by specified criteria"""
+    try:
+        if sort_by == "Similarity Score":
+            return sorted(faces, key=lambda x: x['similarity'], reverse=True)
+        elif sort_by == "Face Size":
+            def get_face_size(face):
+                try:
+                    location_str = face.get('metadata', {}).get('location', '0,0,0,0')
+                    coords = location_str.split(',')
+                    if len(coords) == 4:
+                        top, right, bottom, left = map(int, coords)
+                        return (right - left) * (bottom - top)
+                    return 0
+                except:
+                    return 0
+            return sorted(faces, key=get_face_size, reverse=True)
+        elif sort_by == "File Name":
+            return sorted(faces, key=lambda x: x.get('metadata', {}).get('image_path', ''))
+        elif sort_by == "Date Added":
+            return sorted(faces, key=lambda x: x.get('metadata', {}).get('added_at', ''), reverse=True)
+        else:
+            return faces
+    except Exception as e:
+        # Fall back to similarity sorting
+        return sorted(faces, key=lambda x: x['similarity'], reverse=True)
 
 def search_with_selected_face(face_index: int):
     """Perform search using the selected face"""
@@ -723,7 +1014,7 @@ def show_name_assignment_modal():
         st.info(f"✅ **Aktueller Name:** {existing_data['full_name']}")
     
     # Get all existing persons for selection
-    all_persons = st.session_state.vector_store.get_all_persons()
+    all_persons = get_cached_all_persons()  # Use cached version
     
     # Choice between new person or existing person
     st.subheader("🎯 Person auswählen")
@@ -756,6 +1047,11 @@ def show_name_assignment_modal():
         
         if selected_person_display and person_options[selected_person_display] is not None:
             selected_person = person_options[selected_person_display]
+            
+            # Ensure selected_person is not None
+            if selected_person is None:
+                st.error("Fehler beim Laden der Personendaten")
+                return
             
             # Show person details in columns
             col1, col2, col3 = st.columns(3)
@@ -798,6 +1094,9 @@ def show_name_assignment_modal():
                     if result['total_assigned'] > 1:
                         st.success(f"🔄 {result['total_assigned']-1} ähnliche Gesichter (>80%) automatisch zugewiesen!")
                     
+                    # Invalidate persons cache for refresh
+                    invalidate_persons_cache()
+                    
                     # Clear session state and close dialog
                     _clear_name_assignment_session()
                     st.rerun()
@@ -818,18 +1117,18 @@ def show_name_assignment_modal():
             st.write("**Grunddaten:**")
             first_name = st.text_input(
                 "Vorname: *", 
-                value=existing_data.get('first_name', ''), 
+                value=existing_data.get('first_name', '') or '', 
                 key="new_first_name"
             )
             middle_names = st.text_input(
                 "Zweite Namen:", 
-                value=existing_data.get('middle_names', ''),
+                value=existing_data.get('middle_names', '') or '',
                 help="Z.B.: Moritz Luitpold Damian",
                 key="new_middle_names"
             )
             last_name = st.text_input(
                 "Nachname: *", 
-                value=existing_data.get('last_name', ''), 
+                value=existing_data.get('last_name', '') or '', 
                 key="new_last_name"
             )
         
@@ -858,21 +1157,21 @@ def show_name_assignment_modal():
         
         # Preview full name
         if first_name or middle_names or last_name:
-            name_parts = [p.strip() for p in [first_name, middle_names, last_name] if p.strip()]
+            name_parts = [p.strip() for p in [first_name or '', middle_names or '', last_name or ''] if p and p.strip()]
             full_name = ' '.join(name_parts)
             st.success(f"**Vollständiger Name:** {full_name}")
         
         # Save new person button
         if st.button("💾 Person speichern", type="primary", width='stretch'):
-            if first_name.strip() or last_name.strip():
+            if (first_name and first_name.strip()) or (last_name and last_name.strip()):
                 # Create person data
                 person_data = {
-                    'first_name': first_name.strip(),
-                    'middle_names': middle_names.strip(),
-                    'last_name': last_name.strip(),
-                    'birth_date': birth_date.strip(),
-                    'birth_place': birth_place.strip(),
-                    'notes': notes.strip()
+                    'first_name': (first_name or '').strip(),
+                    'middle_names': (middle_names or '').strip(),
+                    'last_name': (last_name or '').strip(),
+                    'birth_date': (birth_date or '').strip(),
+                    'birth_place': (birth_place or '').strip(),
+                    'notes': (notes or '').strip()
                 }
                 
                 # Assign person with auto-matching
@@ -885,6 +1184,9 @@ def show_name_assignment_modal():
                     
                     if result['total_assigned'] > 1:
                         st.success(f"🔄 {result['total_assigned']-1} ähnliche Gesichter (>80%) automatisch zugewiesen!")
+                    
+                    # Invalidate persons cache for refresh
+                    invalidate_persons_cache()
                     
                     # Clear session state and close dialog
                     _clear_name_assignment_session()
@@ -903,6 +1205,8 @@ def show_name_assignment_modal():
             if st.button("🗑️ Namen entfernen", width='stretch'):
                 if st.session_state.vector_store.remove_person_name(face_id):
                     st.success("✅ Name erfolgreich entfernt!")
+                    # Invalidate persons cache for refresh
+                    invalidate_persons_cache()
                     _clear_name_assignment_session()
                     st.rerun()
                 else:
@@ -1203,7 +1507,7 @@ def show_name_assignment_tab(face_id, image_path, face_location):
         st.info(f"✅ **Aktueller Name:** {existing_data['full_name']}")
     
     # Get all existing persons for selection
-    all_persons = st.session_state.vector_store.get_all_persons()
+    all_persons = get_cached_all_persons()  # Use cached version
     
     # Choice between new person or existing person
     st.subheader("🎯 Person auswählen")
@@ -1230,6 +1534,11 @@ def show_name_assignment_tab(face_id, image_path, face_location):
         
         if selected_person_display and person_options[selected_person_display] is not None:
             selected_person = person_options[selected_person_display]
+            
+            # Ensure selected_person is not None
+            if selected_person is None:
+                st.error("Fehler beim Laden der Personendaten")
+                return
             
             # Show person details
             st.success(f"**Name:** {selected_person['full_name']}")
@@ -1275,20 +1584,22 @@ def show_name_assignment_tab(face_id, image_path, face_location):
         
         # Preview full name
         if first_name or last_name:
-            name_parts = [p.strip() for p in [first_name, last_name] if p.strip()]
+            name_parts = [p.strip() for p in [(first_name or ''), (last_name or '')] if p and p.strip()]
             full_name = ' '.join(name_parts)
             st.success(f"**Vollständiger Name:** {full_name}")
         
         # Save button
         if st.button("💾 Person speichern", type="primary", width='stretch', key="tab_save_person"):
-            if first_name.strip() or last_name.strip():
+            if (first_name and first_name.strip()) or (last_name and last_name.strip()):
                 person_data = {
-                    'first_name': first_name.strip(),
-                    'last_name': last_name.strip(),
-                    'birth_date': birth_date.strip(),
-                    'birth_place': birth_place.strip(),
-                    'notes': notes.strip()
+                    'first_name': (first_name or '').strip(),
+                    'last_name': (last_name or '').strip(),
+                    'birth_date': (birth_date or '').strip(),
+                    'birth_place': (birth_place or '').strip(),
+                    'notes': (notes or '').strip()
                 }
+                
+                full_name = ' '.join([p for p in [person_data['first_name'], person_data['last_name']] if p])
                 
                 person_id = str(uuid.uuid4())
                 
@@ -1579,27 +1890,131 @@ def show_full_image_modal():
             st.rerun()
 
 def display_search_results(results: List[Dict[str, Any]]):
-    """Display search results"""
+    """Display enhanced search results with filtering options"""
     
-    st.subheader(f"Search Results ({len(results)} faces)")
+    st.subheader(f"🎯 Enhanced Search Results ({len(results)} faces)")
     
     if not results:
         st.info("No results to display")
         return
     
+    # Real-time filtering options
+    with st.expander("🔧 Filter Results", expanded=False):
+        col_f1, col_f2, col_f3 = st.columns(3)
+        
+        with col_f1:
+            min_similarity_filter = st.slider(
+                "Min Similarity %",
+                min_value=0,
+                max_value=100,
+                value=0,
+                help="Hide results below this similarity"
+            )
+            
+            min_size_filter = st.slider(
+                "Min Face Size (px)",
+                min_value=20,
+                max_value=200,
+                value=20,
+                help="Hide small faces"
+            )
+        
+        with col_f2:
+            quality_level = st.selectbox(
+                "Quality Level",
+                ["All", "Medium+", "High Only"],
+                index=0,
+                help="Filter by estimated quality"
+            )
+            
+            show_named_only = st.checkbox(
+                "Named Faces Only",
+                value=False,
+                help="Show only faces with assigned names"
+            )
+        
+        with col_f3:
+            sort_order = st.selectbox(
+                "Sort By",
+                ["Similarity ↓", "Similarity ↑", "Size ↓", "Size ↑", "Name A-Z"],
+                index=0,
+                help="Change result ordering"
+            )
+    
+    # Apply filters
+    filtered_results = []
+    for result in results:
+        # Similarity filter
+        if result['similarity'] * 100 < min_similarity_filter:
+            continue
+        
+        # Size filter
+        metadata = result.get('metadata', {})
+        location_str = metadata.get('location', '0,0,0,0')
+        try:
+            coords = location_str.split(',')
+            if len(coords) == 4:
+                top, right, bottom, left = map(int, coords)
+                face_size = min(right - left, bottom - top)
+                if face_size < min_size_filter:
+                    continue
+        except:
+            pass
+        
+        # Quality filter
+        if quality_level == "High Only" and result['similarity'] < 0.7:
+            continue
+        elif quality_level == "Medium+" and result['similarity'] < 0.4:
+            continue
+        
+        # Named faces filter
+        if show_named_only:
+            person_name = metadata.get('full_name', '')
+            if not person_name:
+                continue
+        
+        filtered_results.append(result)
+    
+    # Apply sorting
+    if sort_order == "Similarity ↓":
+        filtered_results = sorted(filtered_results, key=lambda x: x['similarity'], reverse=True)
+    elif sort_order == "Similarity ↑":
+        filtered_results = sorted(filtered_results, key=lambda x: x['similarity'])
+    elif sort_order == "Size ↓":
+        def get_size(x):
+            try:
+                coords = x.get('metadata', {}).get('location', '0,0,0,0').split(',')
+                if len(coords) == 4:
+                    top, right, bottom, left = map(int, coords)
+                    return (right - left) * (bottom - top)
+                return 0
+            except:
+                return 0
+        filtered_results = sorted(filtered_results, key=get_size, reverse=True)
+    elif sort_order == "Name A-Z":
+        filtered_results = sorted(filtered_results, key=lambda x: x.get('metadata', {}).get('full_name', 'zzz'))
+    
+    # Show filter results summary
+    if len(filtered_results) != len(results):
+        st.info(f"📋 Filtered: {len(filtered_results)} of {len(results)} results shown (filtered out {len(results) - len(filtered_results)})")
+    
     # Display options
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.write(f"**{len(results)} results found**")
+        st.write(f"**{len(filtered_results)} results displayed**")
     
     with col2:
         show_all = st.toggle("Show All Images", value=False, help="Toggle pagination on/off")
+    
+    # Use filtered results for display
+    results = filtered_results
     
     # Determine what to display
     if show_all:
         # Show all results
         page_results = results
-        st.info(f"Displaying all {len(results)} results")
+        if len(results) > 20:
+            st.info(f"Displaying all {len(results)} results")
     else:
         # Pagination
         total_pages = (len(results) - 1) // RESULTS_PER_PAGE + 1
@@ -1653,23 +2068,45 @@ def display_search_results(results: List[Dict[str, Any]]):
                                     # Display with enhanced similarity information
                                     st.image(thumbnail, width='stretch')
                                     
-                                    # Enhanced similarity display with confidence levels
+                                    # Enhanced similarity display with quality indicators
                                     similarity_percentage = face_data['similarity'] * 100
                                     confidence_score = face_data.get('confidence_score', similarity_percentage / 100) * 100
                                     
-                                    # Color-coded similarity display based on face recognition standards
+                                    # Calculate face quality metrics
+                                    face_width = right - left
+                                    face_height = bottom - top
+                                    face_size = min(face_width, face_height)
+                                    face_area = face_width * face_height
+                                    
+                                    # Quality indicators
+                                    quality_indicators = []
+                                    if face_size >= 80:
+                                        quality_indicators.append("🔍 High Res")
+                                    elif face_size >= 50:
+                                        quality_indicators.append("📏 Medium Res")
+                                    else:
+                                        quality_indicators.append("📱 Low Res")
+                                    
+                                    if face_area > 6400:  # 80x80
+                                        quality_indicators.append("✨ Large")
+                                    
+                                    # Color-coded similarity display with quality info
                                     if similarity_percentage >= 70:
                                         st.success(f"**🎯 {similarity_percentage:.1f}%**")
-                                        st.caption(f"🔒 Vertrauen: {confidence_score:.1f}%")
+                                        st.caption(f"🔒 Confidence: {confidence_score:.1f}% | Size: {face_size}px")
                                     elif similarity_percentage >= 50:
                                         st.info(f"**✅ {similarity_percentage:.1f}%**")
-                                        st.caption(f"📊 Vertrauen: {confidence_score:.1f}%")
+                                        st.caption(f"📊 Confidence: {confidence_score:.1f}% | Size: {face_size}px")
                                     elif similarity_percentage >= 30:
                                         st.warning(f"**⚠️ {similarity_percentage:.1f}%**")
-                                        st.caption(f"📈 Vertrauen: {confidence_score:.1f}%")
+                                        st.caption(f"📈 Confidence: {confidence_score:.1f}% | Size: {face_size}px")
                                     else:
                                         st.error(f"**❓ {similarity_percentage:.1f}%**")
-                                        st.caption(f"🔍 Vertrauen: {confidence_score:.1f}%")
+                                        st.caption(f"🔍 Confidence: {confidence_score:.1f}% | Size: {face_size}px")
+                                    
+                                    # Display quality indicators
+                                    if quality_indicators:
+                                        st.caption(" | ".join(quality_indicators))
                                     
                                     st.write(f"**📁 {image_path.name}**")
                                     
@@ -1802,8 +2239,9 @@ def batch_face_processing_page():
                 # Count unique images
                 unique_images = set()
                 if existing_data and existing_data.get('metadatas'):
-                    for metadata in existing_data['metadatas']:
-                        if 'image_path' in metadata:
+                    metadatas = existing_data.get('metadatas') or []
+                    for metadata in metadatas:
+                        if metadata and 'image_path' in metadata and isinstance(metadata['image_path'], str):
                             unique_images.add(Path(metadata['image_path']).name)
                 
                 st.metric("Total Faces", f"{total_faces:,}")
@@ -2008,7 +2446,7 @@ def process_with_fast_engine(directory_path, update_existing=False):
     
     finally:
         # Restore original directory
-        if original_dir:
+        if original_dir and 'fast_process' in locals():
             fast_process.IMAGES_DIR = original_dir
 
 
@@ -2030,17 +2468,19 @@ def show_processing_statistics():
         
         # Collect statistics
         image_stats = {}
-        for metadata in metadatas:
-            if 'image_path' in metadata:
-                img_path = metadata['image_path']
-                img_name = Path(img_path).name
-                
-                if img_name not in image_stats:
-                    image_stats[img_name] = {
-                        'faces': 0,
-                        'path': img_path
-                    }
-                image_stats[img_name]['faces'] += 1
+        if metadatas:
+            for metadata in metadatas:
+                if metadata and isinstance(metadata, dict) and 'image_path' in metadata:
+                    img_path = metadata['image_path']
+                    if isinstance(img_path, str):
+                        img_name = Path(img_path).name
+                        
+                        if img_name not in image_stats:
+                            image_stats[img_name] = {
+                                'faces': 0,
+                                'path': img_path
+                            }
+                        image_stats[img_name]['faces'] += 1
         
         # Display overview statistics
         col1, col2, col3, col4 = st.columns(4)
@@ -3932,8 +4372,8 @@ def name_gallery_page():
     st.markdown("Verwalten Sie alle Personen-Namen in der Datenbank")
     
     try:
-        # Get all persons from database
-        persons = st.session_state.vector_store.get_all_persons()
+        # Get all persons from database with caching
+        persons = get_cached_all_persons()
         
         if not persons:
             st.info("Noch keine Namen vergeben. Gehen Sie zu Face Search oder Face Gallery, um Namen zuzuweisen.")
@@ -4016,6 +4456,8 @@ def name_gallery_page():
                             
                             if removed_count > 0:
                                 st.success(f"✅ Name von {removed_count} Gesichtern entfernt!")
+                                # Invalidate persons cache for refresh
+                                invalidate_persons_cache()
                                 st.rerun()
                             else:
                                 st.error("❌ Fehler beim Entfernen der Namen")

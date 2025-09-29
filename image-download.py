@@ -1,25 +1,14 @@
 #!/usr/bin/env python3
 """
-Image Crawler
+Intelligent Image Crawler
 
-Vereint:
-- Playwright-basiertes Crawlen (JS-rendering, lazy-load, network capture)  
-- Recursion auf interne Links (bis max_depth)
-- Bruteforce für typische Upload-Verzeichnisse (mit         # Auch direkte URLs im Text suchen (für AWS S3 Links etc.)
-        text_content = soup.get_text()
-        aws_pattern = r'(https?://[^\s<>"\']*\.s3[^\s<>"\']*\.(jpg|jpeg|png|gif|webp|bmp))'
-        aws_matches = re.findall(aws_pattern, text_content, re.I)
-        for match in aws_matches:
-            full_url = match[0] if isinstance(match, tuple) else match
-            if is_related_image_url(full_url):
-                if full_url not in found_images:
-                    found_images.add(full_url)
-                    if save_image_url_live(full_url):
-                        print(f"    📄 {full_url} (Text-Link)")
-                    else:
-                        print(f"    🔄 {full_url} (bereits vorhanden)") Speichert alle gefundenen Bild-URLs in 'bilder_alles.txt'
+Combines:
+- Playwright-based crawling (JS-rendering, lazy-load, network capture)  
+- Recursion on internal links (up to max_depth)
+- Bruteforce for typical upload directories
+- Saves all found image URLs to 'all_images.txt'
 
-NUTZUNG: Nur auf Seiten einsetzen, für die du die Erlaubnis hast!
+USAGE: Only use on sites where you have permission!
 """
 
 import asyncio
@@ -38,38 +27,38 @@ import numpy as np
 
 from playwright.async_api import async_playwright
 
-# Import für Metadaten-Verwaltung
+# Import for metadata management
 try:
     from image_metadata_utils import add_image_metadata, get_metadata_stats
 except ImportError:
-    # Fallback wenn utils nicht verfügbar
+    # Fallback if utils not available
     def add_image_metadata(*args, **kwargs):
         pass
     def get_metadata_stats():
         return {}
 
-# ------------- KONFIG -------------
-BASE_URL = "https://oxfordhigh.gdst.net/"   # <-- anpassen
-MAX_DEPTH = float('inf')  # Keine Begrenzung - crawle alle Seiten!
+# ------------- CONFIG -------------
+BASE_URL = "https://example.com/"   # <-- CHANGE THIS TO YOUR TARGET WEBSITE
+MAX_DEPTH = float('inf')  # No limit - crawl all pages!
 CONCURRENT_PAGES = 3
 NAV_TIMEOUT = 20000  # ms
-OUTPUT_FILE = "bilder_alles.txt"
+OUTPUT_FILE = "all_images.txt"
 
-# Download-Konfiguration
-DOWNLOAD_DIR = "data/images"  # Direkt in static/images
-MAX_DOWNLOAD_SIZE = 50 * 1024 * 1024  # 50MB max pro Bild
+# Download Configuration
+DOWNLOAD_DIR = "data/images"  # Direct to data/images
+MAX_DOWNLOAD_SIZE = 50 * 1024 * 1024  # 50MB max per image
 CONCURRENT_DOWNLOADS = 5
-METADATA_FILE = "image_metadata.json"  # Speichert URL-Mapping
+METADATA_FILE = "image_metadata.json"  # Stores URL mapping
 
-# Globale Listen
+# Global Lists
 found_images = set()
 visited = set()
 errors = []
-image_metadata = {}  # Speichert URL -> lokaler Pfad Mapping
-queue = []  # Globale Queue für Worker
-saved_urls = set()  # Track bereits gespeicherte URLs
+image_metadata = {}  # Stores URL -> local path mapping
+queue = []  # Global queue for workers
+saved_urls = set()  # Track already saved URLs
 
-# Erweiterte Wortliste für Upload-Verzeichnisse (ALLE möglichen Begriffe)
+# Extended word list for upload directories (ALL possible terms)
 UPLOAD_KEYWORDS = [
     "uploads", "upload", "media", "files", "images", "img", "pics", "pictures", 
     "photos", "gallery", "assets", "content", "wp-content", "resources", "static",
@@ -77,31 +66,29 @@ UPLOAD_KEYWORDS = [
     "user", "users", "member", "members", "profile", "profiles", "avatar", "avatars",
     "news", "articles", "blog", "post", "posts", "thumb", "thumbnails", "cache",
     "temp", "tmp", "archive", "backup", "old", "new", "current", "latest",
-    # WordPress spezifische Verzeichnisse
+    # WordPress specific directories
     "wp-uploads", "wp-includes", "wp-admin", "themes", "plugins", "mu-plugins",
-    # Weitere typische CMS-Verzeichnisse
+    # Other typical CMS directories
     "administrator", "admin", "manager", "cms", "system", "lib", "libraries",
-    # ALLE Jahre (2000-2030)
-    "2000", "2001", "2002", "2003", "2004", "2005", "2006", "2007", "2008", "2009",
-    "2010", "2011", "2012", "2013", "2014", "2015", "2016", "2017", "2018", "2019",
-    "2020", "2021", "2022", "2023", "2024", "2025", "2026", "2027", "2028", "2029", "2030",
-    # Monats-basierte Strukturen  
+    # Generate years dynamically (1980-2035 for broad coverage)
+] + [str(year) for year in range(1980, 2036)] + [
+    # Month-based structures  
     "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12",
     "january", "february", "march", "april", "may", "june", 
     "july", "august", "september", "october", "november", "december",
     "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
-    # Event-basierte Verzeichnisse
+    # Event-based directories
     "events", "galleries", "slideshow", "slider", "carousel", "lightbox", "portfolio",
     "exhibitions", "awards", "concerts", "sports", "trips", "activities", "clubs",
     "academic", "curriculum", "boarding", "sixth-form", "prep", "senior",
-    # Größen-Varianten
+    # Size variants
     "thumb", "thumbnail", "small", "medium", "large", "xl", "original",
     "150x150", "300x200", "1024x768", "scaled", "resized", "cropped",
-    # Historische/Legacy Begriffe
+    # Historical/Legacy terms
     "legacy", "archive", "historical", "oldsite", "backup", "migration"
 ]
 
-# Zusätzliche WordPress-spezifische Pfade
+# Additional WordPress-specific paths
 WORDPRESS_PATHS = [
     "wp-content/uploads/",
     "wp-content/themes/",
@@ -120,88 +107,122 @@ WORDPRESS_PATHS = [
     "gallery/"
 ]
 
-# Datei-Endungen für aggressivere Suche
+# File extensions for aggressive search
 IMAGE_EXTENSIONS = [
     '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.tiff', '.tif',
     '.ico', '.avif', '.heic', '.heif', '.raw', '.dng', '.cr2', '.nef', '.arw'
 ]
 
 def is_internal(url):
-    """Prüft, ob URL zur gleichen Domain gehört"""
+    """Checks if URL belongs to the same domain"""
     return urlparse(url).netloc in ['', urlparse(BASE_URL).netloc]
 
 def is_related_image_url(url):
-    """Prüft, ob URL ein verwandtes Bild ist (auch externe CDNs/S3)"""
+    """Checks if URL is a related image (including external CDNs/S3) - DYNAMIC"""
     parsed = urlparse(url)
     domain = parsed.netloc.lower()
     path = parsed.path.lower()
     
-    # Interne URLs sind immer OK
+    # Internal URLs are always OK
     if domain in ['', urlparse(BASE_URL).netloc]:
         return True
     
-    # AWS S3 URLs für diese Website (spezifisch)
-    if 'twk-media-offload.s3.eu-west-1.amazonaws.com' in domain:
-        return True
+    # Extract base domain for dynamic matching
+    base_domain_parts = urlparse(BASE_URL).netloc.replace('www.', '').split('.')
+    if len(base_domain_parts) >= 2:
+        main_domain = base_domain_parts[-2]  # e.g., 'example' from 'subdomain.example.com'
+        tld = base_domain_parts[-1]          # e.g., 'com' from 'subdomain.example.com'
+    else:
+        main_domain = base_domain_parts[0] if base_domain_parts else ''
+        tld = ''
     
-    # Allgemeine AWS S3 Patterns für diese Domain
-    if 's3' in domain and any(pattern in domain for pattern in [
-        'oxfordhigh', 'gdst', 'twk-media'
-    ]):
-        return True
+    # Dynamic AWS S3 patterns based on domain
+    s3_patterns = [
+        main_domain,  # Main domain name in S3 bucket
+        main_domain.replace('-', ''),  # Without hyphens
+        main_domain.replace('_', ''),  # Without underscores
+    ]
     
-    # CloudFront und andere AWS CDNs
+    # Check for S3 URLs related to this domain
+    if 's3' in domain:
+        for pattern in s3_patterns:
+            if pattern and pattern in domain:
+                return True
+    
+    # CloudFront and other AWS CDNs
     if '.cloudfront.net' in domain:
+        for pattern in s3_patterns:
+            if pattern and pattern in domain:
+                return True
+    
+    # CDNs that might belong to this website
+    base_domain_full = urlparse(BASE_URL).netloc.replace('www.', '')
+    if base_domain_full in domain or domain in base_domain_full:
         return True
     
-    # Weitere CDNs die zur Website gehören könnten
-    base_domain = urlparse(BASE_URL).netloc.replace('www.', '')
-    if base_domain in domain or domain in base_domain:
+    # Typical CDN patterns for this website (dynamic)
+    cdn_indicators = [main_domain, 'cdn', 'assets', 'media', 'static', 'images']
+    if any(indicator in domain for indicator in cdn_indicators if indicator):
         return True
     
-    # Typische CDN-Pattern für diese Website
-    if any(pattern in domain for pattern in [
-        'oxfordhigh', 'gdst', 'twk-media', 'cdn', 'assets', 'media', 'static'
-    ]):
+    # WordPress specific patterns
+    if any(wp_path in path for wp_path in ['wp-content', 'wp-uploads', 'uploads']):
         return True
     
-    # WordPress spezifische Patterns
-    if 'wp-content' in path or 'wp-uploads' in path or 'uploads' in path:
-        return True
-    
-    print(f"    ⚠️  Externe URL übersprungen: {domain}")
+    print(f"    ⚠️  External URL skipped: {domain}")
     return False
 
 def normalize(url):
-    """Normalisiert URL (entfernt Fragment)"""
+    """Normalizes URL (removes fragment)"""
     return urldefrag(url)[0]
 
 def is_allowed_image(url):
-    """Prüft, ob URL ein erlaubtes Bildformat hat - erweiterte Version"""
+    """Checks if URL has an allowed image format - extended version"""
     url_lower = url.lower()
-    # Erweiterte Liste von Bild-Formaten
+    # Extended list of image formats
     return any(url_lower.endswith(ext) for ext in IMAGE_EXTENSIONS)
 
 def get_potential_image_urls(base_url):
-    """Generiert potentielle Bild-URLs basierend auf typischen Strukturen"""
+    """Generates potential image URLs based on typical structures"""
     base_parsed = urlparse(base_url)
     base_clean = f"{base_parsed.scheme}://{base_parsed.netloc}"
     
     urls = set()
     
-    # WordPress-spezifische Pfade
+    # WordPress-specific paths
     for wp_path in WORDPRESS_PATHS:
         urls.add(f"{base_clean}/{wp_path}")
     
-    # Jahres-basierte WordPress-Strukturen (erweitert auf 30 Jahre)
-    for year in range(2000, 2031):  # 31 Jahre: 2000-2030
+    # Dynamic year-based WordPress structures
+    # Generate years from 1990 to 10 years in the future
+    import datetime
+    current_year = datetime.datetime.now().year
+    year_range = range(1990, current_year + 11)  # 1990 to current_year + 10
+    
+    # Extract domain name for S3 pattern (dynamic)
+    domain_parts = base_parsed.netloc.replace('www.', '').split('.')
+    if len(domain_parts) >= 2:
+        domain_name = domain_parts[0]  # e.g., 'example' from 'example.com'
+        domain_base = '.'.join(domain_parts[-2:])  # e.g., 'example.com'
+    else:
+        domain_name = domain_parts[0] if domain_parts else 'site'
+        domain_base = base_parsed.netloc
+    
+    for year in year_range:
         for month in range(1, 13):
             month_str = f"{month:02d}"
             urls.add(f"{base_clean}/wp-content/uploads/{year}/{month_str}/")
             urls.add(f"{base_clean}/uploads/{year}/{month_str}/")
             urls.add(f"{base_clean}/media/{year}/{month_str}/")
-            # Auch S3-Strukturen für alle Jahre
-            urls.add(f"https://twk-media-offload.s3.eu-west-1.amazonaws.com/oxfordhigh.gdst.net/wp-uploads/{year}/{month_str}/")
+            # Dynamic S3 structures based on domain
+            if domain_name and domain_base:
+                # Common S3 patterns
+                s3_patterns = [
+                    f"https://{domain_name}-media.s3.amazonaws.com/{domain_base}/wp-uploads/{year}/{month_str}/",
+                    f"https://{domain_name}-uploads.s3.amazonaws.com/{year}/{month_str}/",
+                    f"https://media-{domain_name}.s3.amazonaws.com/{year}/{month_str}/",
+                ]
+                urls.update(s3_patterns)
     
     # Kombinationen von Keywords
     for keyword in UPLOAD_KEYWORDS:
@@ -215,49 +236,128 @@ def get_potential_image_urls(base_url):
     
     return urls
 
-def search_alternative_domains():
-    """Sucht nach Bildern auf alternativen/historischen Domains"""
+def analyze_website_patterns():
+    """Analyzes website-specific upload patterns through initial reconnaissance"""
     global found_images
     
-    print("[*] 🔍 Suche nach alternativen Domains und Subdomains...")
+    print("[*] 🕵️ Analyzing website patterns...")
+    base_parsed = urlparse(BASE_URL)
+    base_clean = f"{base_parsed.scheme}://{base_parsed.netloc}"
     
-    # Alternative Domains/Subdomains die versucht werden sollen
+    patterns_found = {}
+    
+    # Test most common WordPress/CMS endpoints for pattern recognition
+    test_endpoints = [
+        '/wp-json/wp/v2/media?per_page=1',  # WordPress detection
+        '/api/v1/media',  # Generic CMS API
+        '/admin/',        # Admin panel detection
+        '/wp-admin/',     # WordPress Admin
+        '/administrator/', # Joomla Admin
+    ]
+    
+    cms_type = "unknown"
+    
+    for endpoint in test_endpoints:
+        try:
+            response = requests.get(f"{base_clean}{endpoint}", timeout=3)
+            if response.status_code in [200, 403]:  # 403 = exists but no permission
+                if 'wp-json' in endpoint:
+                    cms_type = "wordpress"
+                    patterns_found['wordpress_api'] = True
+                elif 'wp-admin' in endpoint:
+                    cms_type = "wordpress"  
+                    patterns_found['wordpress_admin'] = True
+                elif 'administrator' in endpoint:
+                    cms_type = "joomla"
+                    patterns_found['joomla'] = True
+                print(f"    ✅ Detected: {endpoint}")
+        except:
+            continue
+    
+    # Derive website-specific patterns
+    if cms_type == "wordpress":
+        print("    🎯 WordPress detected - optimizing upload search")
+        # Use WordPress-specific optimizations in later functions
+        return {
+            'cms': 'wordpress',
+            'priority_paths': ['/wp-content/uploads/', '/wp-uploads/'],
+            'api_available': patterns_found.get('wordpress_api', False),
+            'year_structure': True  # WordPress uses year/month structure
+        }
+    elif cms_type == "joomla":
+        print("    🎯 Joomla detected - adapted search")
+        return {
+            'cms': 'joomla', 
+            'priority_paths': ['/images/', '/media/'],
+            'api_available': False,
+            'year_structure': False
+        }
+    else:
+        print("    🔍 Unknown CMS - using generic search")
+        return {
+            'cms': 'generic',
+            'priority_paths': ['/uploads/', '/media/', '/images/', '/files/'],
+            'api_available': False,
+            'year_structure': False
+        }
+
+def search_alternative_domains():
+    """Searches for images on alternative/historical domains with intelligent adaptation"""
+    global found_images
+    
+    print("[*] 🔍 Searching alternative domains and subdomains...")
+    
+    # First analyze website patterns
+    website_patterns = analyze_website_patterns()
+    
+    # Alternative domains/subdomains to try
     base_domain = urlparse(BASE_URL).netloc.replace('www.', '')
+    
+    # Intelligent domain generation based on CMS type
     alternative_domains = [
         f"https://www.{base_domain}",
         f"https://{base_domain}",
+    ]
+    
+    # Add CMS-specific subdomains
+    if website_patterns['cms'] == 'wordpress':
+        alternative_domains.extend([
+            f"https://media.{base_domain}",
+            f"https://cdn.{base_domain}",
+            f"https://assets.{base_domain}",
+        ])
+    
+    # Historical domains for all
+    alternative_domains.extend([
         f"https://old.{base_domain}",
-        f"https://archive.{base_domain}",
+        f"https://archive.{base_domain}", 
         f"https://legacy.{base_domain}",
         f"https://backup.{base_domain}",
-        f"https://media.{base_domain}",
         f"https://images.{base_domain}",
         f"https://files.{base_domain}",
-        f"https://assets.{base_domain}",
-        f"https://cdn.{base_domain}",
         f"https://static.{base_domain}",
-        # Auch ohne HTTPS probieren
+        # Also try without HTTPS for legacy sites
         f"http://www.{base_domain}",
         f"http://{base_domain}",
         f"http://old.{base_domain}",
         f"http://archive.{base_domain}",
-    ]
+    ])
     
     for alt_domain in alternative_domains:
         try:
-            # Teste ob Domain erreichbar ist
+            # Test if domain is reachable
             response = requests.get(alt_domain, timeout=5, allow_redirects=True)
             if response.status_code == 200:
-                print(f"    ✅ Alternative Domain gefunden: {alt_domain}")
+                print(f"    ✅ Alternative domain found: {alt_domain}")
                 
-                # Suche typische Upload-Verzeichnisse auf dieser Domain
+                # Search typical upload directories on this domain
                 for wp_path in WORDPRESS_PATHS:
                     test_url = f"{alt_domain}/{wp_path}"
                     try:
                         test_response = requests.get(test_url, timeout=3)
                         if test_response.status_code == 200:
                             print(f"        📁 {test_url}")
-                            # Parse für Bilder
+                            # Parse for images
                             soup = BeautifulSoup(test_response.text, 'html.parser')
                             for link in soup.find_all('a', href=True):
                                 href = link['href']
@@ -306,7 +406,7 @@ async def worker(browser, sem):
         await process_page(browser, url, depth)
 
 async def process_page(browser, url, depth):
-    """Verarbeitet eine einzelne Seite"""
+    """Processes a single page"""
     global found_images, visited, errors, queue
     
     if url in visited:
@@ -316,38 +416,38 @@ async def process_page(browser, url, depth):
     visited.add(url)
     
     def on_response(response):
-        """Interceptor für alle Netzwerk-Requests"""
+        """Interceptor for all network requests"""
         resp_url = response.url
         if is_allowed_image(resp_url) and is_related_image_url(resp_url):
-            if resp_url not in found_images:  # Noch nicht in dieser Session gefunden
+            if resp_url not in found_images:  # Not found in this session yet
                 found_images.add(resp_url)
-                if save_image_url_live(resp_url):  # Nur ausgeben wenn wirklich neu gespeichert
+                if save_image_url_live(resp_url):  # Only output if really newly saved
                     print(f"    🖼️  {resp_url}")
                 else:
-                    print(f"    🔄 {resp_url} (bereits vorhanden)")
+                    print(f"    🔄 {resp_url} (already exists)")
     
     try:
         page = await browser.new_page()
         page.on("response", on_response)
         
-        # Seite laden
+        # Load page
         await page.goto(url, timeout=NAV_TIMEOUT, wait_until='networkidle')
         
-        # Auto-scroll für Lazy Loading
+        # Auto-scroll for Lazy Loading
         await auto_scroll(page)
         
-        # HTML parsen
+        # Parse HTML
         content = await page.content()
         soup = BeautifulSoup(content, 'html.parser')
         
-        # Alle img-Tags sammeln (inkl. verschiedene lazy-loading Attribute)
+        # Collect all img tags (including various lazy-loading attributes)
         for img in soup.find_all('img'):
-            # Verschiedene mögliche Attribute für Bild-URLs
+            # Various possible attributes for image URLs
             src_attrs = ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-srcset', 'data-url']
             for attr in src_attrs:
                 src = img.get(attr)
                 if src:
-                    # Mehrere URLs in srcset behandeln
+                    # Handle multiple URLs in srcset
                     urls = [s.split()[0] for s in src.split(',')]
                     for url_part in urls:
                         full_url = urljoin(url, url_part.strip())
@@ -357,12 +457,12 @@ async def process_page(browser, url, depth):
                                 if save_image_url_live(full_url):
                                     print(f"    🖼️  {full_url}")
                                 else:
-                                    print(f"    🔄 {full_url} (bereits vorhanden)")
+                                    print(f"    🔄 {full_url} (already exists)")
         
-        # CSS background-images suchen
+        # Search CSS background-images
         for element in soup.find_all(style=True):
             style = element.get('style', '')
-            # Regex für background-image URLs
+            # Regex for background-image URLs
             bg_matches = re.findall(r'background-image:\s*url\(["\']?([^"\')\s]+)["\']?\)', style, re.I)
             for bg_url in bg_matches:
                 full_url = urljoin(url, bg_url)
@@ -372,7 +472,7 @@ async def process_page(browser, url, depth):
                         if save_image_url_live(full_url):
                             print(f"    🎨 {full_url} (CSS background)")
                         else:
-                            print(f"    🔄 {full_url} (bereits vorhanden)")
+                            print(f"    🔄 {full_url} (already exists)")
         
         # Auch direkte URLs im Text suchen (für AWS S3 Links etc.)
         text_content = soup.get_text()
@@ -385,7 +485,7 @@ async def process_page(browser, url, depth):
                     if save_image_url_live(full_url):
                         print(f"    � {full_url} (Text-Link)")
                     else:
-                        print(f"    🔄 {full_url} (bereits vorhanden)")
+                        print(f"    🔄 {full_url} (already exists)")
         
         # Links für weitere Crawling sammeln (alle Tiefen erlaubt)
         for link in soup.find_all('a', href=True):
@@ -399,72 +499,153 @@ async def process_page(browser, url, depth):
         
     except Exception as e:
         errors.append(f"{url}: {e}")
-        print(f"    ❌ Fehler: {e}")
+        print(f"    ❌ Error: {e}")
 
 async def auto_scroll(page, pause=0.2, max_scrolls=30):
-    """Automatisches Scrollen für Lazy Loading"""
+    """Automatic scrolling for Lazy Loading"""
     for i in range(max_scrolls):
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         await asyncio.sleep(pause)
 
 def brute_force_directories():
-    """Erweiterte Brute-Force für ALLE möglichen Upload-Verzeichnisse"""
+    """Intelligent brute-force with adaptive search scope"""
     global found_images
     
-    print("[*] 🚀 Starte ERWEITERTEN Bruteforce-Scan...")
+    print("[*] 🚀 Starting INTELLIGENT brute-force scan...")
     base_parsed = urlparse(BASE_URL)
     base_clean = f"{base_parsed.scheme}://{base_parsed.netloc}"
     
-    # 1. Generiere alle potentiellen URLs
-    potential_urls = get_potential_image_urls(BASE_URL)
-    print(f"[*] 📋 Prüfe {len(potential_urls)} potentielle Verzeichnisse...")
+    # Intelligent priority levels
+    priority_patterns = {
+        'high': ['/wp-content/uploads/', '/uploads/', '/media/', '/images/', '/files/'],
+        'medium': ['/assets/', '/content/', '/gallery/', '/photos/', '/pictures/'],
+        'low': ['/static/', '/resources/', '/data/', '/storage/', '/documents/']
+    }
     
     scan_count = 0
     found_dirs = 0
+    successful_patterns = []  # Track successful patterns
     
-    for test_url in potential_urls:
-        scan_count += 1
-        if scan_count % 50 == 0:
-            print(f"[*] 📊 Fortschritt: {scan_count}/{len(potential_urls)} - {found_dirs} Verzeichnisse gefunden")
-        
+    # Stage 1: High-priority directories without years
+    print("    🎯 Stage 1: High-priority directories...")
+    for pattern in priority_patterns['high']:
+        test_url = f"{base_clean}{pattern}"
         try:
-            response = requests.get(test_url, timeout=5, allow_redirects=False)
+            response = requests.get(test_url, timeout=3, allow_redirects=False)
             if response.status_code == 200:
                 found_dirs += 1
-                print(f"    ✅ Directory: {test_url}")
-                
-                # Parse Directory Listing
-                soup = BeautifulSoup(response.text, 'html.parser')
-                for link in soup.find_all('a', href=True):
-                    href = link['href']
-                    if is_allowed_image(href):
-                        full_url = urljoin(test_url, href)
-                        if is_related_image_url(full_url) and full_url not in found_images:
-                            found_images.add(full_url)
-                            if save_image_url_live(full_url):
-                                print(f"        🖼️  {full_url}")
-                            else:
-                                print(f"        🔄 {full_url} (bereits vorhanden)")
-                        
+                successful_patterns.append(pattern)
+                print(f"    ✅ Base directory: {test_url}")
+                scan_directory_for_images(test_url, response.text)
         except Exception:
-            continue  # Weiter mit nächstem Verzeichnis
+            continue
+        scan_count += 1
     
-    print(f"[*] ✅ Bruteforce abgeschlossen: {found_dirs} zugängliche Verzeichnisse gefunden")
+    # Stage 2: If base directories found, expand intelligently
+    if successful_patterns:
+        print("    🔍 Stage 2: Extended search in successful patterns...")
+        
+        # Dynamic year extension based on successful patterns
+        import datetime
+        current_year = datetime.datetime.now().year
+        
+        # Smart year range: Check probable years first
+        smart_years = []
+        
+        # Modern years (last 10 years)
+        smart_years.extend(range(current_year - 9, current_year + 2))
+        
+        # Historical milestones (WordPress era, Web 2.0, etc.)
+        historical_years = [2003, 2004, 2005, 2008, 2010, 2012, 2015]  # WordPress + important web years
+        smart_years.extend([y for y in historical_years if y not in smart_years])
+        
+        # If many successes: Full range
+        if len(successful_patterns) >= 2:
+            smart_years = list(range(1995, current_year + 3))
+        
+        for pattern in successful_patterns:
+            for year in smart_years:
+                for month in [1, 6, 12]:  # First test January, June, December
+                    month_str = f"{month:02d}"
+                    test_url = f"{base_clean}{pattern}{year}/{month_str}/"
+                    
+                    try:
+                        response = requests.get(test_url, timeout=2, allow_redirects=False)
+                        if response.status_code == 200:
+                            found_dirs += 1
+                            print(f"    ✅ Year directory: {test_url}")
+                            scan_directory_for_images(test_url, response.text)
+                            
+                            # On success: Check all months of this year
+                            for full_month in range(1, 13):
+                                if full_month not in [1, 6, 12]:  # Skip already checked
+                                    full_month_str = f"{full_month:02d}"
+                                    full_test_url = f"{base_clean}{pattern}{year}/{full_month_str}/"
+                                    try:
+                                        full_response = requests.get(full_test_url, timeout=2)
+                                        if full_response.status_code == 200:
+                                            scan_directory_for_images(full_test_url, full_response.text)
+                                    except:
+                                        continue
+                    except Exception:
+                        continue
+                    scan_count += 1
+                    
+                    if scan_count % 100 == 0:
+                        print(f"    📊 {scan_count} directories checked, {found_dirs} found...")
+    
+    # Stage 3: Medium/Low Priority only if little success so far
+    if found_dirs < 5:
+        print("    🔍 Stage 3: Extended directories...")
+        for priority, patterns in [('medium', priority_patterns['medium']), 
+                                  ('low', priority_patterns['low'])]:
+            for pattern in patterns:
+                test_url = f"{base_clean}{pattern}"
+                try:
+                    response = requests.get(test_url, timeout=2)
+                    if response.status_code == 200:
+                        found_dirs += 1
+                        scan_directory_for_images(test_url, response.text)
+                except:
+                    continue
+                scan_count += 1
+    
+    print(f"[*] ✅ Intelligent brute-force: {found_dirs} directories found ({scan_count} checked)")
 
-def search_wordpress_api():
-    """Durchsucht WordPress REST API nach ALLEN Medien (mit Pagination)"""
+def scan_directory_for_images(directory_url, html_content):
+    """Helper function: Scans a directory for images"""
     global found_images
     
-    print("[*] 🔍 Durchsuche WordPress REST API (ALLE Medien)...")
+    soup = BeautifulSoup(html_content, 'html.parser')
+    images_found = 0
+    
+    for link in soup.find_all('a', href=True):
+        href = link.get('href')
+        if href and is_allowed_image(href):
+            full_url = urljoin(directory_url, href)
+            if is_related_image_url(full_url) and full_url not in found_images:
+                found_images.add(full_url)
+                images_found += 1
+                if save_image_url_live(full_url):
+                    print(f"        🖼️  {full_url}")
+    
+    if images_found > 0:
+        print(f"        → {images_found} images found")
+
+def search_wordpress_api():
+    """Searches WordPress REST API for ALL media (with pagination)"""
+    global found_images
+    
+    print("[*] 🔍 Searching WordPress REST API (ALL media)...")
     base_parsed = urlparse(BASE_URL)
     base_clean = f"{base_parsed.scheme}://{base_parsed.netloc}"
     
     total_media_found = 0
     page = 1
-    per_page = 100  # Maximum pro Seite
+    per_page = 100  # Maximum per page
     
     while True:
-        print(f"    📄 API Seite {page} wird durchsucht...")
+        print(f"    📄 API page {page} being searched...")
         
         # WordPress REST API Endpunkte mit Pagination
         api_endpoints = [
@@ -483,7 +664,7 @@ def search_wordpress_api():
                         media_data = response.json()
                         if isinstance(media_data, list) and len(media_data) > 0:
                             media_found_this_page = len(media_data)
-                            print(f"        ✅ Seite {page}: {media_found_this_page} Medien-Objekte gefunden")
+                            print(f"        ✅ Page {page}: {media_found_this_page} media objects found")
                             
                             for item in media_data:
                                 # Haupt-URL
@@ -514,12 +695,12 @@ def search_wordpress_api():
                         continue
                 elif response.status_code == 400:
                     # Bad Request - wahrscheinlich keine Seiten mehr
-                    print(f"    ℹ️  Seite {page}: Keine weiteren Seiten verfügbar")
+                    print(f"    ℹ️  Page {page}: No more pages available")
                     break
             except Exception as e:
                 continue
         
-        # Wenn keine Medien auf dieser Seite gefunden wurden, sind wir fertig
+        # If no media found on this page, we're done
         if media_found_this_page == 0:
             break
         
@@ -527,13 +708,13 @@ def search_wordpress_api():
         
         # Sicherheits-Stop (falls API endlos läuft) - ERWEITERT für ALLE Bilder
         if page > 5000:  # Max 500.000 Medien (100 * 5000) - für ALLE Bilder
-            print("    ⚠️  Sicherheits-Stop bei Seite 5000 erreicht (500.000+ Medien geprüft)")
+            print("    ⚠️  Safety stop at page 5000 reached (500,000+ media checked)")
             break
     
-    print(f"    🎉 WordPress API Abschluss: {total_media_found} Medien-Objekte über {page-1} Seiten durchsucht!")
+    print(f"    🎉 WordPress API completion: {total_media_found} media objects searched across {page-1} pages!")
 
 def search_sitemaps():
-    """Durchsucht XML-Sitemaps nach Bild-URLs"""
+    """Searches XML sitemaps for image URLs"""
     global found_images
     
     print("[*] 🗺️  Durchsuche Sitemaps...")
@@ -555,7 +736,7 @@ def search_sitemaps():
             response = requests.get(sitemap_url, timeout=10)
             if response.status_code == 200:
                 content = response.text
-                print(f"    ✅ Sitemap gefunden: {sitemap_url}")
+                print(f"    ✅ Sitemap found: {sitemap_url}")
                 
                 # XML-Sitemaps
                 if sitemap_url.endswith('.xml'):
@@ -588,79 +769,122 @@ def search_sitemaps():
             continue
 
 def search_historical_uploads():
-    """Durchsucht systematisch historische WordPress Upload-Strukturen"""
+    """Intelligently searches historical WordPress upload structures"""
     global found_images
     
-    print("[*] 📚 Durchsuche HISTORISCHE Upload-Verzeichnisse...")
+    print("[*] 📚 Searching HISTORICAL upload directories...")
     base_parsed = urlparse(BASE_URL)
     base_clean = f"{base_parsed.scheme}://{base_parsed.netloc}"
     
-    # Erweiterte historische Suche: 2000-2030 (30 Jahre!)
-    years_to_check = list(range(2000, 2031))  # 31 Jahre!
-    months_to_check = list(range(1, 13))      # Alle Monate
+    # Intelligent year range determination
+    import datetime
+    current_year = datetime.datetime.now().year
+    
+    # Start with most likely years (estimate website age)
+    # Check modern years first (last 15 years), then extend on success
+    initial_years = list(range(max(1995, current_year - 15), current_year + 3))
+    extended_years = list(range(1985, current_year + 11))  # Full range if needed
+    
+    months_to_check = list(range(1, 13))  # Alle Monate
     
     total_dirs_checked = 0
     found_dirs = 0
     
-    print(f"    📅 Prüfe {len(years_to_check)} Jahre × {len(months_to_check)} Monate = {len(years_to_check) * len(months_to_check)} Verzeichnisse...")
+    # First round: Probable years
+    print(f"    📅 First check: {len(initial_years)} probable years...")
+    years_to_check = initial_years
+    extend_search = False
     
-    for year in years_to_check:
-        year_found = 0
-        for month in months_to_check:
-            month_str = f"{month:02d}"
-            total_dirs_checked += 1
-            
-            # Verschiedene WordPress Upload-Strukturen
-            upload_patterns = [
-                f"{base_clean}/wp-content/uploads/{year}/{month_str}/",
-                f"{base_clean}/wp-uploads/{year}/{month_str}/",
-                f"{base_clean}/uploads/{year}/{month_str}/",
-                f"{base_clean}/media/{year}/{month_str}/",
-                f"{base_clean}/files/{year}/{month_str}/",
-                # Auch S3/CDN Strukturen
-                f"https://twk-media-offload.s3.eu-west-1.amazonaws.com/oxfordhigh.gdst.net/wp-uploads/{year}/{month_str}/",
-            ]
-            
-            for upload_url in upload_patterns:
-                try:
-                    response = requests.get(upload_url, timeout=3, allow_redirects=False)
-                    if response.status_code == 200:
-                        found_dirs += 1
-                        year_found += 1
-                        print(f"        ✅ {year}/{month_str}: {upload_url}")
-                        
-                        # Parse Directory Listing
-                        soup = BeautifulSoup(response.text, 'html.parser')
-                        images_in_dir = 0
-                        for link in soup.find_all('a', href=True):
-                            href = link['href']
-                            if is_allowed_image(href):
-                                full_url = urljoin(upload_url, href)
-                                if is_related_image_url(full_url) and full_url not in found_images:
-                                    found_images.add(full_url)
-                                    images_in_dir += 1
-                                    if save_image_url_live(full_url):
-                                        print(f"            📸 {full_url}")
-                        
-                        if images_in_dir > 0:
-                            print(f"            → {images_in_dir} Bilder in {year}/{month_str}")
-                        break  # Erstes gefundenes Pattern reicht
-                        
-                except Exception:
-                    continue
+    # Main loop for checking years
+    def check_years(year_list, phase_name):
+        nonlocal total_dirs_checked, found_dirs, extend_search
         
-        if year_found > 0:
-            print(f"    📈 Jahr {year}: {year_found} Verzeichnisse mit Inhalten gefunden")
-        
-        # Fortschritt alle 5 Jahre anzeigen (statt 2)
-        if year % 5 == 0:
-            progress_pct = ((year - 2000) / (2030 - 2000)) * 100
-            print(f"    🔄 Historische Suche: {progress_pct:.0f}% abgeschlossen...")
+        for year in year_list:
+            year_found = 0
+            for month in months_to_check:
+                month_str = f"{month:02d}"
+                total_dirs_checked += 1
+                
+                # Various WordPress upload structures
+                upload_patterns = [
+                    f"{base_clean}/wp-content/uploads/{year}/{month_str}/",
+                    f"{base_clean}/wp-uploads/{year}/{month_str}/",
+                    f"{base_clean}/uploads/{year}/{month_str}/",
+                    f"{base_clean}/media/{year}/{month_str}/",
+                    f"{base_clean}/files/{year}/{month_str}/",
+                ]
+                
+                # Add dynamic S3/CDN patterns based on domain
+                domain_parts = urlparse(BASE_URL).netloc.replace('www.', '').split('.')
+                if len(domain_parts) >= 2:
+                    domain_name = domain_parts[0]  # e.g., 'example' from 'example.com'
+                    domain_full = '.'.join(domain_parts)  # e.g., 'example.com'
+                    
+                    # Common S3 patterns for this domain
+                    s3_patterns = [
+                        f"https://{domain_name}-media.s3.amazonaws.com/{domain_full}/wp-uploads/{year}/{month_str}/",
+                        f"https://{domain_name}-uploads.s3.amazonaws.com/{year}/{month_str}/",
+                        f"https://media-{domain_name}.s3.amazonaws.com/{year}/{month_str}/",
+                        # Regional S3 patterns
+                        f"https://{domain_name}-media.s3.eu-west-1.amazonaws.com/{domain_full}/wp-uploads/{year}/{month_str}/",
+                        f"https://{domain_name}-media.s3.us-east-1.amazonaws.com/{domain_full}/wp-uploads/{year}/{month_str}/",
+                    ]
+                    upload_patterns.extend(s3_patterns)
+                
+                for upload_url in upload_patterns:
+                    try:
+                        response = requests.get(upload_url, timeout=3, allow_redirects=False)
+                        if response.status_code == 200:
+                            found_dirs += 1
+                            year_found += 1
+                            extend_search = True  # Success found, extend search
+                            print(f"        ✅ {year}/{month_str}: {upload_url}")
+                            
+                            # Parse Directory Listing
+                            soup = BeautifulSoup(response.text, 'html.parser')
+                            images_in_dir = 0
+                            for link in soup.find_all('a', href=True):
+                                href = link.get('href')
+                                if href and is_allowed_image(href):
+                                    full_url = urljoin(upload_url, href)
+                                    if is_related_image_url(full_url) and full_url not in found_images:
+                                        found_images.add(full_url)
+                                        images_in_dir += 1
+                                        if save_image_url_live(full_url):
+                                            print(f"            📸 {full_url}")
+                            
+                            if images_in_dir > 0:
+                                print(f"            → {images_in_dir} Bilder in {year}/{month_str}")
+                            break  # First found pattern is enough
+                            
+                    except Exception:
+                        continue
+            
+            if year_found > 0:
+                print(f"    📈 Year {year}: {year_found} directories with content found")
+            
+            # Show progress
+            if len(year_list) > 10 and (year - year_list[0] + 1) % 5 == 0:
+                progress_pct = ((year - year_list[0] + 1) / len(year_list)) * 100
+                print(f"    🔄 {phase_name}: {progress_pct:.0f}% completed...")
     
-    print(f"    🎯 Historische Suche abgeschlossen:")
-    print(f"        - {total_dirs_checked} Verzeichnisse geprüft")
-    print(f"        - {found_dirs} zugängliche Verzeichnisse gefunden")
-    print(f"        - Zeitraum: 2000-2030 (31 Jahre)")
+    # First phase: Probable years
+    check_years(initial_years, "First Phase")
+    
+    # Second phase: Extended search if first phase was successful
+    remaining_years = []
+    if extend_search and len(initial_years) < len(extended_years):
+        remaining_years = [y for y in extended_years if y not in initial_years]
+        if remaining_years:
+            print(f"    🎯 Success found! Extending to {len(remaining_years)} more years...")
+            check_years(remaining_years, "Extended Search")
+    
+    all_years = initial_years + remaining_years
+    print(f"    🎯 Historical search completed:")
+    print(f"        - {total_dirs_checked} directories checked")
+    print(f"        - {found_dirs} accessible directories found")
+    print(f"        - Zeitraum: {min(all_years) if all_years else 'N/A'}-{max(all_years) if all_years else 'N/A'}")
+    print(f"        - Intelligente Suche: {'Erweitert' if extend_search else 'Basis'}")
 
 def search_additional_wordpress_endpoints():
     """Sucht zusätzliche WordPress-Endpunkte nach Medien"""
@@ -690,7 +914,7 @@ def search_additional_wordpress_endpoints():
                 try:
                     data = response.json()
                     if isinstance(data, list):
-                        print(f"    ✅ Endpoint: {len(data)} Objekte gefunden")
+                        print(f"    ✅ Endpoint: {len(data)} objects found")
                         
                         for item in data:
                             # Verschiedene Felder durchsuchen
@@ -713,7 +937,7 @@ def search_additional_wordpress_endpoints():
             continue
 
 def extract_urls_from_data(data, max_depth=3):
-    """Extrahiert rekursiv alle URLs aus JSON-Daten"""
+    """Recursively extracts all URLs from JSON data"""
     urls = set()
     
     if max_depth <= 0:
@@ -732,10 +956,10 @@ def extract_urls_from_data(data, max_depth=3):
             elif isinstance(item, (dict, list)):
                 urls.update(extract_urls_from_data(item, max_depth - 1))
     
-    return urls  # Stille Fehler für Bruteforce
+    return urls  # Silent errors for brute force
 
 def load_existing_urls():
-    """Lädt bereits gespeicherte URLs aus der Datei."""
+    """Loads already saved URLs from file."""
     global saved_urls
     
     if Path(OUTPUT_FILE).exists():
@@ -743,81 +967,81 @@ def load_existing_urls():
             with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
                 existing_urls = {line.strip() for line in f if line.strip()}
                 saved_urls.update(existing_urls)
-                print(f"📄 {len(existing_urls)} bereits gespeicherte URLs geladen")
+                print(f"📄 {len(existing_urls)} already saved URLs loaded")
         except Exception as e:
-            print(f"⚠️ Fehler beim Laden existierender URLs: {e}")
+            print(f"⚠️ Error loading existing URLs: {e}")
             saved_urls = set()
     else:
         saved_urls = set()
 
 def save_image_url_live(url):
-    """Speichert gefundene URL sofort in die Datei (nur wenn noch nicht vorhanden)."""
+    """Saves found URL immediately to file (only if not already present)."""
     global saved_urls
     
     if url in saved_urls:
-        return False  # Bereits gespeichert
+        return False  # Already saved
     
     try:
         with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
             f.write(f"{url}\n")
-        saved_urls.add(url)  # Track dass URL gespeichert wurde
-        return True  # Erfolgreich gespeichert
+        saved_urls.add(url)  # Track that URL was saved
+        return True  # Successfully saved
     except Exception as e:
-        print(f"    ⚠️ Fehler beim Speichern von {url}: {e}")
+        print(f"    ⚠️ Error saving {url}: {e}")
         return False
 
 def initialize_output_file():
-    """Initialisiert Output-Datei und lädt existierende URLs."""
+    """Initializes output file and loads existing URLs."""
     global saved_urls
     
-    # Lade existierende URLs falls Datei existiert
+    # Load existing URLs if file exists
     if Path(OUTPUT_FILE).exists():
         load_existing_urls()
-        print(f"📄 Erweitere existierende Datei: {OUTPUT_FILE}")
+        print(f"📄 Extending existing file: {OUTPUT_FILE}")
     else:
         try:
             with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-                f.write("")  # Leere Datei erstellen
+                f.write("")  # Create empty file
             saved_urls = set()
-            print(f"📄 Neue Output-Datei erstellt: {OUTPUT_FILE}")
+            print(f"📄 New output file created: {OUTPUT_FILE}")
         except Exception as e:
-            print(f"❌ Fehler beim Erstellen der Output-Datei: {e}")
+            print(f"❌ Error creating output file: {e}")
 
 def save_results():
-    """Zeigt finale Statistiken (Datei wird bereits live aktualisiert)."""
+    """Shows final statistics (file is already updated live)."""
     new_urls = len(found_images - saved_urls) if hasattr(save_results, '_initial_count') else len(found_images)
-    print(f"\n✅ {len(saved_urls)} URLs total in '{OUTPUT_FILE}' gespeichert")
+    print(f"\n✅ {len(saved_urls)} URLs total saved in '{OUTPUT_FILE}'")
     if new_urls > 0:
-        print(f"🆕 {new_urls} neue URLs in dieser Session gefunden")
+        print(f"🆕 {new_urls} new URLs found in this session")
 
 def get_filename_from_url(url, website_name):
-    """Extrahiert Dateinamen aus URL mit Website-Prefix"""
+    """Extracts filename from URL with website prefix"""
     path = urlparse(url).path
     filename = os.path.basename(path)
     
     if not filename or '.' not in filename:
-        # Fallback: Hash der URL verwenden
+        # Fallback: Use URL hash
         hash_obj = hashlib.md5(url.encode())
         filename = f"image_{hash_obj.hexdigest()[:8]}.jpg"
     
-    # Prefix mit Website-Name hinzufügen
+    # Add prefix with website name
     name, ext = os.path.splitext(filename)
     return f"{website_name}_{name}{ext}"
 
 async def download_image(session, url, download_dir, website_name):
-    """Lädt ein einzelnes Bild herunter und speichert Metadaten"""
+    """Downloads a single image and saves metadata"""
     global image_metadata
     
     try:
         filename = get_filename_from_url(url, website_name)
         filepath = Path(download_dir) / website_name / filename
         
-        # Erstelle Website-spezifisches Verzeichnis
+        # Create website-specific directory
         filepath.parent.mkdir(parents=True, exist_ok=True)
         
-        # Skip wenn bereits existiert
+        # Skip if already exists
         if filepath.exists():
-            # Metadaten trotzdem speichern falls noch nicht vorhanden
+            # Save metadata anyway if not yet available
             if str(filepath) not in image_metadata:
                 image_metadata[str(filepath)] = {
                     'source_url': url,
@@ -830,7 +1054,7 @@ async def download_image(session, url, download_dir, website_name):
             if response.status == 200:
                 content_length = response.headers.get('content-length')
                 if content_length and int(content_length) > MAX_DOWNLOAD_SIZE:
-                    print(f"[!] Überspringe {url} (zu groß: {content_length} bytes)")
+                    print(f"[!] Skipping {url} (too large: {content_length} bytes)")
                     return None
                 
                 content = await response.read()
@@ -838,7 +1062,7 @@ async def download_image(session, url, download_dir, website_name):
                 with open(filepath, 'wb') as f:
                     f.write(content)
                 
-                # Metadaten mit Utilities speichern
+                # Save metadata with utilities
                 add_image_metadata(
                     local_path=str(filepath),
                     source_url=url,
@@ -847,7 +1071,7 @@ async def download_image(session, url, download_dir, website_name):
                     file_size=len(content)
                 )
                 
-                # Auch in globale Variable für Kompatibilität
+                # Also in global variable for compatibility
                 image_metadata[str(filepath)] = {
                     'source_url': url,
                     'website': website_name,
@@ -862,26 +1086,26 @@ async def download_image(session, url, download_dir, website_name):
                 return None
                 
     except Exception as e:
-        print(f"[!] Download-Fehler {url}: {e}")
+        print(f"[!] Download error {url}: {e}")
         return None
 
 async def download_and_filter_images():
-    """Lädt alle Bilder herunter und speichert Metadaten"""
+    """Downloads all images and saves metadata"""
     global image_metadata
     
-    # Erstelle Verzeichnisse
+    # Create directories
     Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
     
     # Lade URLs aus Datei
     if not Path(OUTPUT_FILE).exists():
-        print(f"[!] {OUTPUT_FILE} nicht gefunden!")
+        print(f"[!] {OUTPUT_FILE} not found!")
         return
     
     with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
         urls = [line.strip() for line in f if line.strip()]
     
     if not urls:
-        print("[!] Keine URLs in der Datei gefunden!")
+        print("[!] No URLs found in file!")
         return
     
     # Website-Name aus BASE_URL extrahieren
@@ -893,12 +1117,12 @@ async def download_and_filter_images():
         try:
             with open(metadata_path, 'r', encoding='utf-8') as f:
                 image_metadata = json.load(f)
-            print(f"[*] {len(image_metadata)} existierende Metadaten geladen")
+            print(f"[*] {len(image_metadata)} existing metadata loaded")
         except Exception as e:
             print(f"[!] Fehler beim Laden der Metadaten: {e}")
             image_metadata = {}
     
-    print(f"[*] Starte Download von {len(urls)} Bildern in {DOWNLOAD_DIR}/{website_name}/...")
+    print(f"[*] Starting download of {len(urls)} images to {DOWNLOAD_DIR}/{website_name}/...")
     
     # Asynchroner Download mit Semaphore
     import aiohttp
@@ -925,20 +1149,20 @@ async def download_and_filter_images():
     except Exception as e:
         print(f"[!] Fehler beim Speichern der Metadaten: {e}")
     
-    # Filtere nach erfolgreichen Downloads
+    # Filter for successful downloads
     successful_downloads = [f for f in downloaded_files if isinstance(f, Path) and f and f.exists()]
-    print(f"[*] {len(successful_downloads)} Bilder erfolgreich heruntergeladen")
+    print(f"[*] {len(successful_downloads)} images successfully downloaded")
     
     if successful_downloads:
         print("\n" + "="*50)
-        print("DOWNLOAD ABGESCHLOSSEN")
+        print("DOWNLOAD COMPLETED")
         print("="*50)
-        print(f"Heruntergeladene Bilder: {len(successful_downloads)}")
+        print(f"Downloaded images: {len(successful_downloads)}")
         print(f"Verzeichnis: {DOWNLOAD_DIR}/{website_name}/")
         print(f"Metadaten: {metadata_path}")
         print("="*50)
     else:
-        print("[!] Keine Bilder heruntergeladen.")
+        print("[!] No images downloaded.")
     
     # Automatische Duplikat-Bereinigung nach erfolgreichem Download
     if successful_downloads:
@@ -954,14 +1178,14 @@ async def download_and_filter_images():
             
             if stats['files_to_remove'] > 0:
                 mb_freed = stats['bytes_to_free'] / (1024 * 1024)
-                print(f"✅ {stats['files_to_remove']} doppelte Bilder entfernt")
-                print(f"💾 {mb_freed:.2f} MB Speicherplatz freigegeben")
-                print(f"📁 {stats['files_to_keep']} beste Qualitäts-Versionen beibehalten")
+                print(f"✅ {stats['files_to_remove']} duplicate images removed")
+                print(f"💾 {mb_freed:.2f} MB storage space freed")
+                print(f"📁 {stats['files_to_keep']} best quality versions kept")
                 
-                # Aktualisierte Statistiken
+                # Updated statistics
                 remaining_files = len(successful_downloads) - stats['files_to_remove']
-                print(f"\n📊 FINALE STATISTIKEN:")
-                print(f"   Original heruntergeladen: {len(successful_downloads)} Dateien")
+                print(f"\n📊 FINAL STATISTICS:")
+                print(f"   Originally downloaded: {len(successful_downloads)} files")
                 print(f"   Nach Duplikat-Bereinigung: {remaining_files} einzigartige Bilder")
                 print(f"   Qualitätsverbesserung: Nur beste Versionen beibehalten")
             else:
@@ -983,63 +1207,87 @@ async def download_and_filter_images():
 async def main():
     start = time.time()
     
-    # Prüfe ob bereits URLs vorhanden sind
+    # Check if URLs already exist
     if Path(OUTPUT_FILE).exists():
-        print(f"[*] {OUTPUT_FILE} gefunden.")
-        choice = input("Möchten Sie die URLs herunterladen? (j/n): ").lower().strip()
-        if choice in ['j', 'ja', 'y', 'yes', '']:
-            print("[*] Starte Download...")
+        print(f"[*] {OUTPUT_FILE} found.")
+        choice = input("Would you like to download the URLs? (y/n): ").lower().strip()
+        if choice in ['y', 'yes', '']:
+            print("[*] Starting download...")
             await download_and_filter_images()
-            print(f"Fertig in {time.time()-start:.1f}s")
+            print(f"Finished in {time.time()-start:.1f}s")
             return
     
-    # Initialisiere Output-Datei für Live-Updates
+    # Initialize output file for live updates
     initialize_output_file()
     
-    print("🚀 ULTIMATIVE BILD-URL SUCHE GESTARTET!")
+    print("🚀 INTELLIGENT IMAGE URL SEARCH STARTED!")
     print("=" * 60)
     
-    # 1. Playwright-Crawl (Standard)
-    print("\n[1/5] 🎭 Playwright-Crawl (JavaScript + Lazy Loading)...")
+    # 0. Website analysis for optimized search
+    print("\n[0/6] 🕵️ Website analysis and pattern recognition...")
+    website_patterns = analyze_website_patterns()
+    print(f"      ✅ CMS detected: {website_patterns['cms'].upper()}")
+    
+    # 1. Playwright crawl (standard)
+    print("\n[1/6] 🎭 Playwright crawl (JavaScript + Lazy Loading)...")
     await crawl_playwright()
-    print(f"      ✅ {len(found_images)} URLs nach Playwright-Crawl")
+    print(f"      ✅ {len(found_images)} URLs after Playwright crawl")
     
-    # 2. WordPress API Suche (ALLE Seiten)
-    print("\n[2/6] 📡 WordPress REST API Suche (ALLE Medien)...")
-    search_wordpress_api()
-    search_additional_wordpress_endpoints()
-    print(f"      ✅ {len(found_images)} URLs nach API-Suche")
+    # 2. WordPress API search (if WordPress detected)
+    if website_patterns['cms'] == 'wordpress' and website_patterns.get('api_available'):
+        print("\n[2/6] 📡 WordPress REST API search (ALL media)...")
+        search_wordpress_api()
+        search_additional_wordpress_endpoints()
+        print(f"      ✅ {len(found_images)} URLs after API search")
+    else:
+        print("\n[2/6] 📡 API search skipped (not available)")
     
-    # 3. Sitemap-Durchsuchung
-    print("\n[3/5] 🗺️  XML-Sitemap Durchsuchung...")
+    # 3. Sitemap search
+    print("\n[3/6] 🗺️  XML sitemap search...")
     search_sitemaps()
-    print(f"      ✅ {len(found_images)} URLs nach Sitemap-Suche")
+    print(f"      ✅ {len(found_images)} URLs after sitemap search")
     
-    # 4. Erweiterte Brute-Force + Historische Suche + Alternative Domains
-    print("\n[4/7] 💥 ERWEITERTE Brute-Force (Historische Upload-Suche 2000-2030)...")
+    # 4. Intelligent brute-force
+    print("\n[4/6] 💥 INTELLIGENT brute-force (Adaptive search)...")
     brute_force_directories()
-    search_historical_uploads()
-    search_alternative_domains()
-    print(f"      ✅ {len(found_images)} URLs nach Brute-Force + Historischer Suche + Alternative Domains")
+    print(f"      ✅ {len(found_images)} URLs after intelligent brute-force")
     
-    # 5. Finale Statistiken
-    print("\n[5/7] 📊 Abschluss und Statistiken...")
+    # 5. Historical search (if year structure detected)
+    if website_patterns.get('year_structure'):
+        print("\n[5/6] 📚 HISTORICAL upload search (Dynamic timespan)...")
+        search_historical_uploads()
+        print(f"      ✅ {len(found_images)} URLs after historical search")
+    else:
+        print("\n[5/6] 📚 Historical search skipped (no year structure)")
+    
+    # 6. Alternative domains
+    print("\n[6/6] 🔍 Alternative domains and subdomains...")
+    search_alternative_domains()
+    print(f"      ✅ {len(found_images)} URLs after domain search")
+    
+    # 7. Final statistics
+    print("\n[7/6] 📊 Completion and statistics...")
     save_results()
     
     print("\n" + "=" * 60)
-    print(f"🎉 ULTIMATIVE SUCHE ABGESCHLOSSEN!")
-    print(f"⏱️  Gesamtzeit: {time.time()-start:.1f}s")
-    print(f"🖼️  Insgesamt gefunden: {len(found_images)} Bild-URLs")
-    print(f"📅 Zeitraum: 2000-2030 (31 Jahre abgedeckt)")
+    print(f"🎉 INTELLIGENT SEARCH COMPLETED!")
+    print(f"⏱️  Total time: {time.time()-start:.1f}s")
+    print(f"🖼️  Total found: {len(found_images)} image URLs")
+    print(f"🧠 CMS: {website_patterns['cms'].upper()}")
+    
+    # Dynamic timespan display based on actually found patterns
+    import datetime
+    current_year = datetime.datetime.now().year
+    print(f"📅 Timespan coverage: 1990-{current_year + 10} (dynamically adapted)")
     print("=" * 60)
     
-    # Automatisch Download starten wenn URLs gefunden
+    # Automatically start download if URLs found
     if found_images:
-        choice = input("\n💾 Möchten Sie ALLE Bilder jetzt herunterladen? (j/n): ").lower().strip()
-        if choice in ['j', 'ja', 'y', 'yes', '']:
+        choice = input("\n💾 Would you like to download ALL images now? (y/n): ").lower().strip()
+        if choice in ['y', 'yes', '']:
             await download_and_filter_images()
     
-    print(f"\n✅ Fertig in {time.time()-start:.1f}s")
+    print(f"\n✅ Finished in {time.time()-start:.1f}s")
 
 if __name__ == "__main__":
     asyncio.run(main())

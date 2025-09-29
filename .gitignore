@@ -81,3 +81,5 @@ model/
 
 # Face recognition model cache
 ~/.deepface/
+dev_to_article.md
+README_old.md

@@ -1,24 +1,24 @@
-# Face Recognition App - Features & Documentation
+# Face Recognition System - Features & Documentation
 
-## ✅ Aktuell implementierte Funktionen
+## ✅ Currently Implemented Features
 
-### 🔍 **Face Search (Gesichtssuche)**
-- Upload eines Referenzbildes mit Gesichtserkennung
-- Ähnlichkeitssuche in der Datenbank mit einstellbarem Threshold
-- Mehrfach-Gesichtserkennung mit Auswahlmöglichkeit
-- Vollbild-Ansicht mit markiertem Gesicht
-- Detaillierte Gesichtsanalyse (Alter, Geschlecht, Emotionen, Ethnie)
-- **Neu: Person Namen zuweisen** für gefundene Gesichter
+### 🔍 **Face Search**
+- Upload reference image with face detection
+- Similarity search in database with adjustable threshold
+- Multi-face detection with selection interface
+- Full-screen view with highlighted face
+- Detailed facial analysis (age, gender, emotions, ethnicity)
+- **New: Assign person names** to found faces
 
-### 👥 **Face Gallery (Gesichts-Galerie)**
-- Übersicht aller Gesichter in der Datenbank
-- Paginierung und anpassbare Ansicht (20-500 Gesichter pro Seite)
-- Metadaten-Anzeige mit Dateinfo und Position
-- Löschfunktionen für falsch erkannte Gesichter:
-  - Einzellöschung mit Bestätigung
-  - Batch-Löschung ganzer Seiten
-  - Intelligente Qualitätskontrolle (niedrige Qualität automatisch erkennen)
-- **Neu: Person Namen zuweisen** in der Galerie
+### 👥 **Face Gallery**
+- Overview of all faces in the database
+- Pagination with customizable view (20-500 faces per page)
+- Metadata display with file info and position
+- Delete functions for incorrectly detected faces:
+  - Individual deletion with confirmation
+  - Batch deletion of entire pages
+  - Intelligent quality control (automatically detect low quality)
+- **New: Assign person names** in the gallery
 
 ### 🏷️ **Name Gallery (Namen-Galerie)** - NEU!
 - Übersicht aller vergebenen Personen-Namen
