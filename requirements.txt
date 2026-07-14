@@ -11,7 +11,7 @@ insightface==0.7.3
 scikit-learn==1.3.2
 
 chromadb==0.4.24        # maximal bis 0.4.x empfohlen für Mac
-faiss-cpu==1.7.4
+faiss-cpu
 
 playwright==1.40.0
 beautifulsoup4==4.12.2
