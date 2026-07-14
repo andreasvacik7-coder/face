@@ -9,7 +9,25 @@ import warnings
 # Suppress the pkg_resources deprecation warning
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API.*")
 import os
-import streamlit as st
+import streamlit as stdef check_password():
+    def password_entered():
+        if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
+            st.session_state["authenticated"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["authenticated"] = False
+
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.text_input("Password", type="password", on_change=password_entered, key="password")
+    if "authenticated" in st.session_state and not st.session_state["authenticated"]:
+        st.error("Incorrect password")
+    return False
+
+if not check_password():
+    st.stop()
+
 import asyncio
 import numpy as np
 import cv2
